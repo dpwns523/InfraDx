@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "infradx"
+version = "0.1.0"
+description = "AI-powered infrastructure troubleshooting tool"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "textual>=0.80.0",
+    "aiosqlite>=0.20.0",
+    "aiofiles>=24.1.0",
+    "rich>=13.0.0",
+    "pyperclip>=1.9.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-textual-snapshot>=0.4.0",
+]
+
+[project.scripts]
+infradx = "infradx.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/infradx"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
