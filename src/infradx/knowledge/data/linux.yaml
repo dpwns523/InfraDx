@@ -1,0 +1,344 @@
+# Linux Known Issues — InfraDx Knowledge Base
+# schema version: 1
+domain: server
+os: linux
+
+issues:
+
+  - id: linux-mem-001
+    title: OOM Killer 발동으로 프로세스 강제 종료
+    severity: critical
+    category: memory
+    keywords: [oom, "out of memory", killed, "kill process", 프로세스종료, 메모리부족]
+    symptoms:
+      - 프로세스가 갑자기 종료됨 (서비스 다운)
+      - dmesg에 "Out of memory: Kill process <pid>" 메시지
+      - 특정 시간대에 반복 발생
+    dmesg_patterns:
+      - "Out of memory: Kill process"
+      - "oom_kill_process"
+      - "Memory cgroup out of memory"
+    diagnosis_commands:
+      - cmd: "dmesg -T | grep -iE 'oom|killed|kill process' | tail -30"
+        purpose: OOM 이벤트 확인
+      - cmd: "journalctl -k --since '1 hour ago' | grep -i oom"
+        purpose: systemd 저널 OOM 기록
+      - cmd: "free -h && cat /proc/meminfo | grep -E 'MemFree|MemAvailable|SwapFree|Committed'"
+        purpose: 현재 메모리 상태
+    root_causes:
+      - 메모리 누수 (memory leak) — 장시간 실행 시 점진적 증가
+      - 스왑 미설정 또는 스왑 부족
+      - cgroup memory.limit_in_bytes 초과 (컨테이너 환경)
+      - JVM heap 설정 과도 (-Xmx 과다)
+      - 대량 데이터 처리 중 임시 메모리 폭증
+    fix:
+      immediate:
+        - "문제 프로세스 재시작: systemctl restart <service>"
+        - "임시 캐시 해제: echo 3 > /proc/sys/vm/drop_caches"
+        - "메모리 많이 쓰는 프로세스 확인 후 kill: ps aux --sort=-%mem | head -10"
+      permanent:
+        - "swap 추가: fallocate -l 4G /swapfile && mkswap /swapfile && swapon /swapfile"
+        - "vm.swappiness 조정: sysctl vm.swappiness=10"
+        - "애플리케이션 메모리 누수 수정"
+        - "cgroup 메모리 한도 상향 또는 컨테이너 리소스 증설"
+    prevention:
+      - "MemAvailable < 총 RAM 10% 시 알림"
+      - "장기 실행 프로세스 RSS 증가 추이 모니터링"
+    kernel_versions: all
+    references:
+      - "https://www.kernel.org/doc/Documentation/vm/overcommit-accounting"
+
+  - id: linux-mem-002
+    title: 메모리 누수 — 점진적 가용 메모리 감소
+    severity: high
+    category: memory
+    keywords: [leak, "memory leak", 메모리누수, 점진적, "free -h", rss증가]
+    symptoms:
+      - 재시작 후 정상, 시간이 지날수록 느려짐
+      - free -h에서 available이 시간에 따라 감소
+      - 특정 프로세스 RSS가 지속 증가
+    diagnosis_commands:
+      - cmd: "ps -o pid,vsz,rss,comm --sort=-rss | head -15"
+        purpose: RSS 큰 프로세스 순위
+      - cmd: "for i in $(seq 5); do date; free -m | grep Mem; sleep 60; done"
+        purpose: 1분 간격 메모리 추이
+      - cmd: "cat /proc/<pid>/smaps | grep -E '^(Rss|Pss|Swap):' | awk '{sum+=$2} END{print sum/1024\" MB\"}'"
+        purpose: 특정 프로세스 상세 메모리
+    root_causes:
+      - 힙 할당 후 미해제 (C/C++ 코드)
+      - 파이썬/자바 객체 참조 유지로 GC 미회수
+      - 파일 디스크립터 누수로 인한 커널 메모리 점유
+    fix:
+      immediate:
+        - "해당 서비스 주기적 재시작 (cron 또는 systemd OnCalendar)"
+      permanent:
+        - "valgrind / heaptrack으로 누수 위치 확인"
+        - "Java: jmap -histo <pid> → 큰 객체 추적"
+        - "Python: tracemalloc, objgraph 사용"
+    prevention:
+      - "프로세스별 RSS 증가율 모니터링 (Prometheus process_resident_memory_bytes)"
+
+  - id: linux-cpu-001
+    title: CPU Load Average 급등 — I/O Wait 원인
+    severity: high
+    category: cpu
+    keywords: [load, iowait, "i/o wait", "%wa", loadaverage, cpu높음, 부하]
+    symptoms:
+      - top/uptime에서 load average가 CPU 수의 2배 이상
+      - top에서 %wa (iowait) 컬럼이 20% 이상
+      - 시스템 전반적으로 느리지만 CPU us/sy는 낮음
+    diagnosis_commands:
+      - cmd: "iostat -xz 1 5"
+        purpose: 디스크 I/O 포화 확인
+      - cmd: "top -bn1 | head -10"
+        purpose: wa 컬럼 확인
+      - cmd: "ps aux | awk '$8~/D/{print}'"
+        purpose: D 상태 (uninterruptible sleep) 프로세스
+      - cmd: "iotop -b -n 3 | head -20"
+        purpose: I/O 유발 프로세스
+    root_causes:
+      - 디스크 I/O 포화 (iostat %util > 90%)
+      - NFS 마운트 응답 지연
+      - 스왑 활성화로 인한 디스크 I/O (si/so > 0)
+      - 느린 SAN/iSCSI 경로
+    fix:
+      immediate:
+        - "I/O 폭주 프로세스 ionice 조정: ionice -c 3 -p <pid>"
+        - "NFS 마운트라면 재마운트 또는 서버 확인"
+      permanent:
+        - "SSD 교체 또는 디스크 증설"
+        - "I/O 스케줄러 변경 (SSD): echo none > /sys/block/sda/queue/scheduler"
+        - "애플리케이션 I/O 패턴 최적화 (버퍼 I/O, async I/O)"
+    prevention:
+      - "iostat %util > 70% 알림"
+      - "load average > CPU수 알림"
+
+  - id: linux-cpu-002
+    title: 단일 프로세스 CPU 100% — 무한루프 또는 스핀락
+    severity: high
+    category: cpu
+    keywords: [cpu100, spinlock, runaway, "100%", 무한루프, 스핀, 단일프로세스]
+    symptoms:
+      - ps aux에서 특정 PID가 CPU 100% 이상 지속
+      - 해당 프로세스 kill 없이 스스로 안 줄어듦
+      - 멀티코어지만 1개 코어만 100% 점유
+    diagnosis_commands:
+      - cmd: "ps aux --sort=-%cpu | head -10"
+        purpose: CPU 상위 프로세스
+      - cmd: "top -H -p <pid>"
+        purpose: 스레드 단위 CPU 사용률
+      - cmd: "strace -p <pid> -c -f 2>&1 | head -30"
+        purpose: 시스템 콜 패턴 (무한루프 감지)
+      - cmd: "cat /proc/<pid>/wchan"
+        purpose: 프로세스 대기 위치
+    root_causes:
+      - 무한 루프 버그
+      - 스핀락 경합 (커널 또는 라이브러리)
+      - 시그널 핸들러 버그
+      - 정규표현식 ReDoS
+    fix:
+      immediate:
+        - "프로세스 재시작: systemctl restart <service> 또는 kill -9 <pid>"
+        - "CPU 제한: cpulimit -p <pid> -l 50"
+      permanent:
+        - "코드 수정: 루프 종료 조건 및 타임아웃 추가"
+        - "ulimit 또는 cgroup cpu.quota 설정으로 영향 제한"
+
+  - id: linux-net-001
+    title: TCP TIME_WAIT 소진 — 연결 실패
+    severity: high
+    category: network
+    keywords: [timewait, "time_wait", "cannot assign", 포트고갈, ephemeral, 연결실패]
+    symptoms:
+      - '"connect: Cannot assign requested address" 에러'
+      - ss -s에서 timewait 수천~수만
+      - 주로 짧은 주기로 외부 API 호출하는 서비스에서 발생
+    diagnosis_commands:
+      - cmd: "ss -s | grep timewait"
+        purpose: TIME_WAIT 개수 확인
+      - cmd: "cat /proc/sys/net/ipv4/ip_local_port_range"
+        purpose: 사용 가능 포트 범위
+      - cmd: "ss -tan state time-wait | wc -l"
+        purpose: TIME_WAIT 소켓 수
+    root_causes:
+      - 짧은 연결을 빈번하게 맺는 클라이언트 (HTTP/1.0, 연결 풀 미사용)
+      - ip_local_port_range가 좁음 (기본 32768-60999)
+      - tcp_tw_reuse 미설정
+    fix:
+      immediate:
+        - "포트 범위 확장: sysctl -w net.ipv4.ip_local_port_range='1024 65535'"
+        - "tw_reuse 활성화: sysctl -w net.ipv4.tcp_tw_reuse=1"
+      permanent:
+        - "/etc/sysctl.conf에 영구 적용"
+        - "HTTP Keep-Alive 또는 커넥션 풀 사용으로 근본 해결"
+    prevention:
+      - "ss -s의 timewait > 10000 시 알림"
+
+  - id: linux-net-002
+    title: 파일 디스크립터 고갈 — Too many open files
+    severity: critical
+    category: network
+    keywords: ["too many open files", "file descriptor", fd고갈, ulimit, nofile]
+    symptoms:
+      - 애플리케이션 로그에 "Too many open files"
+      - 새 연결/파일 열기 실패
+      - lsof -n | wc -l 이 수만 이상
+    diagnosis_commands:
+      - cmd: "lsof -n | wc -l"
+        purpose: 전체 FD 사용량
+      - cmd: "lsof -n | awk '{print $1}' | sort | uniq -c | sort -rn | head -20"
+        purpose: 프로세스별 FD 사용량
+      - cmd: "cat /proc/<pid>/limits | grep 'open files'"
+        purpose: 해당 프로세스 FD 한도
+      - cmd: "cat /proc/sys/fs/file-nr"
+        purpose: 시스템 전체 FD 사용/한도
+    root_causes:
+      - FD 누수 (open 후 close 안 함)
+      - ulimit nofile 기본값(1024) 너무 낮음
+      - 소켓 누수
+    fix:
+      immediate:
+        - "프로세스 재시작으로 누수 FD 해제"
+      permanent:
+        - "/etc/security/limits.conf에 nofile 65535 설정"
+        - "systemd 서비스라면 LimitNOFILE=65535 추가"
+        - "sysctl fs.file-max 증가"
+    prevention:
+      - "프로세스별 fd 사용률 모니터링: ls /proc/<pid>/fd | wc -l"
+
+  - id: linux-disk-001
+    title: 파일시스템 읽기 전용 재마운트 — ext4/xfs 오류
+    severity: critical
+    category: disk
+    keywords: ["read-only", remount, "ext4-fs error", "xfs error", 읽기전용, 재마운트, filesystem]
+    symptoms:
+      - 파일 쓰기 실패: "Read-only file system"
+      - dmesg에 "EXT4-fs error" 또는 "XFS: Internal error"
+      - df -hT에서 정상이지만 쓰기 불가
+    dmesg_patterns:
+      - "EXT4-fs error"
+      - "XFS: Internal error"
+      - "Remounting filesystem read-only"
+      - "end_request: I/O error"
+    diagnosis_commands:
+      - cmd: "dmesg -T | grep -iE 'error|remount|readonly|xfs|ext4' | tail -30"
+        purpose: 파일시스템 오류 확인
+      - cmd: "mount | grep 'ro,'"
+        purpose: 읽기전용 마운트 확인
+      - cmd: "smartctl -a /dev/sdX"
+        purpose: 디스크 SMART 상태
+    root_causes:
+      - 디스크 하드웨어 오류 (배드섹터)
+      - 비정상 종료로 인한 저널 손상
+      - RAID 컨트롤러 오류
+      - 케이블/커넥터 불량
+    fix:
+      immediate:
+        - "읽기전용 해제 시도: mount -o remount,rw /mountpoint"
+        - "서비스 중단 후 fsck 실행 필수"
+      permanent:
+        - "unmount 후: fsck -y /dev/sdXN"
+        - "XFS: xfs_repair /dev/sdXN"
+        - "SMART 오류 있으면 디스크 교체"
+    prevention:
+      - "smartd 활성화 + 주간 SMART 체크"
+      - "dmesg I/O error 발생 시 즉시 알림"
+
+  - id: linux-kernel-001
+    title: 커널 패닉 — Kernel Panic
+    severity: critical
+    category: kernel
+    keywords: [panic, "kernel panic", oops, "call trace", segfault, 커널패닉]
+    symptoms:
+      - 시스템이 갑자기 재부팅
+      - dmesg에 "Kernel panic" 또는 "Call Trace"
+      - /var/crash 에 코어 덤프 생성
+    dmesg_patterns:
+      - "Kernel panic - not syncing"
+      - "BUG: unable to handle"
+      - "Call Trace:"
+      - "general protection fault"
+    diagnosis_commands:
+      - cmd: "journalctl -k -b -1 | tail -100"
+        purpose: 이전 부팅의 커널 로그
+      - cmd: "ls -lt /var/crash/"
+        purpose: 크래시 덤프 확인
+      - cmd: "dmesg -T | grep -A 20 'Call Trace'"
+        purpose: 패닉 스택 트레이스
+      - cmd: "last reboot | head -10"
+        purpose: 재부팅 이력
+    root_causes:
+      - 드라이버 버그 (특히 서드파티 커널 모듈)
+      - 메모리 하드웨어 불량 (ECC 오류)
+      - 커널 버전 버그
+      - 하드웨어 과열
+    fix:
+      immediate:
+        - "크래시 덤프 보존 후 재부팅"
+      permanent:
+        - "문제 모듈 비활성화: modprobe -r <module>"
+        - "커널 업그레이드: apt/yum update kernel"
+        - "메모리 테스트: memtest86+"
+        - "kdump 설정으로 크래시 분석"
+    prevention:
+      - "커널 업데이트 정기 적용"
+      - "ECC 메모리 오류 모니터링 (edac-utils)"
+
+  - id: linux-zombie-001
+    title: 좀비 프로세스 누적 — Zombie Process
+    severity: medium
+    category: process
+    keywords: [zombie, defunct, "Z state", 좀비프로세스, defunct]
+    symptoms:
+      - ps aux에서 STAT 컬럼이 Z인 프로세스 다수
+      - 프로세스 수가 계속 증가하지만 실제 실행 중인 것은 적음
+      - 부모 프로세스가 wait() 미호출
+    diagnosis_commands:
+      - cmd: "ps aux | awk '$8==\"Z\"' | wc -l"
+        purpose: 좀비 수 확인
+      - cmd: "ps aux | awk '$8==\"Z\"{print $0}'"
+        purpose: 좀비 프로세스 목록
+      - cmd: "ps -el | grep Z | awk '{print $5}' | xargs -I{} ps -p {} -o pid,ppid,comm"
+        purpose: 부모 프로세스 확인
+    root_causes:
+      - 부모 프로세스가 자식 종료 시 wait() 미호출
+      - 멀티프로세스 서버의 시그널 핸들러 버그
+    fix:
+      immediate:
+        - "부모 프로세스 재시작 (자식 좀비도 함께 정리됨)"
+        - "부모도 종료된 경우: init이 자동 회수하므로 재부팅"
+      permanent:
+        - "코드 수정: SIGCHLD 핸들러에서 waitpid() 호출"
+
+  - id: linux-nfs-001
+    title: NFS 마운트 hang — D 상태 프로세스 다수
+    severity: critical
+    category: network
+    keywords: [nfs, hang, "D state", "uninterruptible", nfs마운트, 응답없음]
+    symptoms:
+      - NFS 마운트 경로 접근 시 응답 없음 (무한 대기)
+      - ps aux에서 D 상태 프로세스가 해당 경로 접근 중
+      - df 명령어 자체가 hang
+    diagnosis_commands:
+      - cmd: "cat /proc/mounts | grep nfs"
+        purpose: NFS 마운트 확인
+      - cmd: "showmount -e <nfs-server>"
+        purpose: NFS 서버 응답 확인
+      - cmd: "nfsstat -c"
+        purpose: NFS 클라이언트 통계
+      - cmd: "ps aux | awk '$8~/D/{print}'"
+        purpose: D 상태 프로세스 목록
+    root_causes:
+      - NFS 서버 다운 또는 네트워크 단절
+      - hard 마운트 옵션 사용 (기본값) — 서버 복구까지 무한 재시도
+      - 방화벽으로 NFS 포트 차단
+    fix:
+      immediate:
+        - "soft 마운트로 재마운트: umount -f -l /mnt/nfs && mount -o soft,timeo=30 <서버>:<경로> /mnt/nfs"
+        - "네트워크 경로 확인: ping <nfs-server>"
+      permanent:
+        - "마운트 옵션에 soft,timeo=30,retrans=3 추가"
+        - "autofs 사용으로 자동 재마운트"
+    prevention:
+      - "NFS 서버 ping 모니터링"
+      - "D 상태 프로세스 수 > 5 시 알림"

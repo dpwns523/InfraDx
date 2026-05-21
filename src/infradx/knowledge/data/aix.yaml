@@ -1,0 +1,251 @@
+# AIX Known Issues — InfraDx Knowledge Base
+# schema version: 1
+domain: server
+os: aix
+
+issues:
+
+  - id: aix-mem-001
+    title: Paging Space 부족 — 페이징 스페이스 고갈
+    severity: critical
+    category: memory
+    keywords: [paging, "paging space", pgsp, "page space", 페이징, svmon, lsps]
+    symptoms:
+      - 프로세스 강제 종료 (kill -9 없이)
+      - '"Paging space is low" 시스템 경고'
+      - topas에서 pg% 높음
+      - errpt에 J_PAGING_DEVICE 오류
+    errpt_patterns:
+      - "J_PAGING_DEVICE"
+      - "PAGING_SPACE_KILL"
+      - "PAGING_SPACE_WARN"
+    diagnosis_commands:
+      - cmd: "lsps -s"
+        purpose: 페이징 스페이스 전체 사용률
+      - cmd: "lsps -a"
+        purpose: 페이징 스페이스별 상세 (활성/크기)
+      - cmd: "svmon -G"
+        purpose: 전체 메모리/페이징 사용 요약
+      - cmd: "svmon -P -t 10"
+        purpose: 상위 10개 프로세스 메모리 사용
+      - cmd: "errpt -a | head -80"
+        purpose: 시스템 오류 로그
+    root_causes:
+      - 페이징 스페이스 크기 부족 (일반적으로 RAM의 1.5~2배 권장)
+      - 메모리 누수로 인한 점진적 소모
+      - 대량 배치 작업 동시 실행
+      - WLM(Workload Manager) 미설정으로 특정 프로세스 독점
+    fix:
+      immediate:
+        - "페이징 스페이스 동적 확장: chps -s 256 paging00  (블록 단위 추가)"
+        - "메모리 많이 쓰는 프로세스 확인 후 종료: svmon -P -t 5"
+      permanent:
+        - "새 페이징 스페이스 추가: mkps -s 1024 -n -a /dev/hdisk1"
+        - "RAM 증설 검토"
+        - "WLM 설정으로 프로세스별 메모리 한도"
+    prevention:
+      - "lsps -s의 %Used > 70% 시 알림"
+      - "nagios/nimbus로 페이징 모니터링"
+
+  - id: aix-mem-002
+    title: 메모리 핀닝 과다 — Pinned Memory 점유
+    severity: high
+    category: memory
+    keywords: [pinned, "pinned memory", 핀메모리, svmon, computepinned]
+    symptoms:
+      - svmon -G에서 pin 값이 비정상적으로 높음
+      - 실제 free 메모리는 적은데 프로세스 메모리 합산과 불일치
+      - 커널 및 드라이버 메모리 점유 증가
+    diagnosis_commands:
+      - cmd: "svmon -G | head -5"
+        purpose: 전체 메모리 요약 (pin 컬럼 확인)
+      - cmd: "svmon -K"
+        purpose: 커널 세그먼트별 메모리
+      - cmd: "vmstat -v | grep -i pin"
+        purpose: 핀 메모리 상세
+    root_causes:
+      - DMA 사용 디바이스 드라이버 (HBA, NIC) 핀 메모리 누수
+      - IBM DB2의 large page 핀닝
+      - 잘못된 커널 파라미터 (maxpin% 미조정)
+    fix:
+      immediate:
+        - "해당 드라이버 재로드 시도"
+      permanent:
+        - "vmo -o maxpin%=80 으로 핀 메모리 한도 설정"
+        - "드라이버 업데이트 (APAR 확인)"
+        - "IBM 지원 케이스 오픈"
+
+  - id: aix-cpu-001
+    title: LPAR CPU Entitled 초과 — CPU 쓰로틀링
+    severity: high
+    category: cpu
+    keywords: [entitled, lpar, "shared pool", capped, uncapped, 쓰로틀링, hmc]
+    symptoms:
+      - topas에서 physc(물리 CPU)가 entitled capacity를 초과
+      - capped LPAR의 경우 CPU 사용률이 entitled에서 정체
+      - 시스템 응답은 느리지만 에러는 없음
+    diagnosis_commands:
+      - cmd: "topas -P | head -20"
+        purpose: CPU 사용률 및 Ent% 확인
+      - cmd: "lparstat -i"
+        purpose: LPAR 설정 (Entitled, Min, Max CPU)
+      - cmd: "lparstat 1 5"
+        purpose: 실시간 LPAR 자원 사용
+      - cmd: "pmcycles -m"
+        purpose: 물리 CPU 속도 확인
+    root_causes:
+      - Capped 모드에서 entitled CPU 부족
+      - 공유 프로세서 풀 경합 (다른 LPAR과 자원 경쟁)
+      - 배치 작업과 온라인 서비스 동시 실행
+    fix:
+      immediate:
+        - "HMC에서 LPAR CPU 동적 추가 (DLPAR): chhwres -m <server> -r proc -p <lpar> -o a -q 1"
+        - "Uncapped 모드로 전환하여 공유 풀 CPU 활용"
+      permanent:
+        - "HMC에서 Entitled CPU 증가"
+        - "배치 작업 시간대 분리 (WLM 스케줄)"
+        - "Uncapped + weight 설정으로 우선순위 조정"
+    prevention:
+      - "lparstat의 physc/entc 비율 모니터링"
+      - "physc > entc * 0.9 시 알림"
+
+  - id: aix-disk-001
+    title: 디스크 오류 — SCSI/FC 하드웨어 오류
+    severity: critical
+    category: disk
+    keywords: [scsi, fc, "disk error", errpt, "I/O error", hdisk, 디스크오류, hba]
+    symptoms:
+      - errpt에 SCSI_ERR2 또는 DISK_ERR1 오류
+      - I/O 오류로 애플리케이션 실패
+      - 특정 hdisk에만 집중된 오류
+    errpt_patterns:
+      - "SCSI_ERR2"
+      - "DISK_ERR1"
+      - "DISK_ERR2"
+      - "FC_ERROR"
+      - "RDUMP"
+    diagnosis_commands:
+      - cmd: "errpt -a | head -100"
+        purpose: 전체 오류 로그 (최근 100개)
+      - cmd: "errpt -j <ERRPT_ID> -a"
+        purpose: 특정 오류 상세 분석
+      - cmd: "lsdev -Cc disk"
+        purpose: 디스크 장치 목록 및 상태
+      - cmd: "lspath -l hdisk<N>"
+        purpose: MPIO 경로 상태
+      - cmd: "errpt -d H -s $(date -d '24 hours ago' +%m%d%H%M%y)"
+        purpose: 최근 24시간 하드웨어 오류
+    root_causes:
+      - FC(Fibre Channel) 케이블/SFP 불량
+      - HBA(Host Bus Adapter) 펌웨어 오류
+      - SAN 스위치 포트 오류
+      - 스토리지 어레이 LUN 오류
+    fix:
+      immediate:
+        - "MPIO 오류 경로 비활성화: chpath -l hdisk<N> -p fscsi0 -s disable"
+        - "정상 경로로 I/O 전환 확인: lspath -l hdisk<N>"
+      permanent:
+        - "HBA 펌웨어 업데이트 (IBM Fix Central)"
+        - "FC 케이블/SFP 교체"
+        - "SAN 스위치 포트 재협상"
+    prevention:
+      - "errpt 오류 발생 시 즉시 메일 알림: errnotify"
+      - "MPIO 경로 수 모니터링"
+
+  - id: aix-net-001
+    title: 네트워크 어댑터 오류 — entstat 오류 카운터 증가
+    severity: high
+    category: network
+    keywords: [entstat, ent, "receive error", "transmit error", 어댑터오류, 네트워크오류]
+    symptoms:
+      - entstat에서 Receive Errors 또는 Transmit Errors 증가
+      - 간헐적 네트워크 연결 끊김
+      - netstat -s에서 오류 카운터 증가
+    diagnosis_commands:
+      - cmd: "entstat -d ent0 | grep -iE 'error|drop|miss|collision'"
+        purpose: 어댑터 오류 카운터
+      - cmd: "netstat -v ent0"
+        purpose: 네트워크 인터페이스 상세 통계
+      - cmd: "errpt -d S | head -50"
+        purpose: 소프트웨어 오류 로그
+      - cmd: "lsattr -El ent0"
+        purpose: 어댑터 속성 (속도/듀플렉스)
+    root_causes:
+      - 케이블/포트 물리적 불량
+      - 속도/듀플렉스 불일치 (half-duplex 협상)
+      - 어댑터 드라이버 버그
+      - jumbo frame MTU 불일치
+    fix:
+      immediate:
+        - "어댑터 재초기화: rmdev -l ent0 && mkdev -l ent0"
+      permanent:
+        - "속도/듀플렉스 고정: chdev -l ent0 -a media_speed=Auto_Negotiation"
+        - "드라이버 업데이트 (ifixes 적용)"
+        - "케이블/포트 교체"
+    prevention:
+      - "entstat 오류 카운터 증가율 모니터링"
+
+  - id: aix-vg-001
+    title: Volume Group 비활성화 — VG Varied Off
+    severity: critical
+    category: disk
+    keywords: [vg, "volume group", "varied off", varyoffvg, lvm, 볼륨그룹]
+    symptoms:
+      - '"Volume group is in varied off state" 메시지'
+      - 해당 VG의 LV 파일시스템 접근 불가
+      - lsvg -o에서 VG가 보이지 않음
+    diagnosis_commands:
+      - cmd: "lsvg"
+        purpose: 전체 VG 목록 (활성/비활성)
+      - cmd: "lsvg -o"
+        purpose: 활성화된 VG만 표시
+      - cmd: "lsvg <vgname>"
+        purpose: 특정 VG 상세 (MAX PVs, 상태)
+      - cmd: "lspv | grep -v None"
+        purpose: PV 상태 확인 (active/missing)
+      - cmd: "errpt -a | grep -i vg | head -30"
+        purpose: VG 관련 오류 로그
+    root_causes:
+      - 멤버 디스크(PV) 분리 또는 오류
+      - 비정상 종료 (ODM 손상)
+      - FC 경로 단절로 디스크 접근 불가
+    fix:
+      immediate:
+        - "VG 활성화 시도: varyonvg <vgname>"
+        - "실패 시 force 옵션: varyonvg -f <vgname> (데이터 손실 위험 — 백업 확인 후)"
+      permanent:
+        - "누락된 PV 확인 및 디스크 교체 후 복구"
+        - "VG descriptor 수동 복구: recreatevg (전문가 지원 권장)"
+    prevention:
+      - "lsvg -o 결과로 VG 활성화 상태 모니터링"
+      - "MPIO 경로 상태 감시"
+
+  - id: aix-errpt-001
+    title: errpt HARDWARE 오류 — 물리 장애 감지
+    severity: critical
+    category: hardware
+    keywords: [errpt, hardware, perm, "permanent error", hrdw, 하드웨어오류]
+    symptoms:
+      - "errpt -a에서 Class: H (Hardware), Type: PERM 오류"
+      - 반복적인 동일 ERRPT ID 발생
+      - 특정 장치에 집중된 오류
+    diagnosis_commands:
+      - cmd: "errpt -a -d H | head -100"
+        purpose: 하드웨어 오류만 필터링
+      - cmd: "errpt -a -T PERM | head -50"
+        purpose: 영구 오류만 표시
+      - cmd: "errpt | awk 'NR>1{print $2}' | sort | uniq -c | sort -rn | head -10"
+        purpose: ERRPT ID별 빈도 집계
+    root_causes:
+      - 디스크 / HBA / 메모리 하드웨어 불량
+      - 팬/전원공급장치 오류 (PERM 환경 오류)
+    fix:
+      immediate:
+        - "errpt 오류 ID로 IBM 지원 검색: https://www.ibm.com/support/knowledgecenter"
+        - "해당 장치 교체 준비"
+      permanent:
+        - "IBM PMR/케이스 오픈 후 하드웨어 교체"
+        - "errpt 오류 정리: errclear 0 (해결 후)"
+    prevention:
+      - "errnotify로 PERM 오류 발생 시 즉시 알림 설정"
+      - "errpt -a -d H 주간 리뷰"

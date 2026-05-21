@@ -1,0 +1,258 @@
+# Disk Known Issues — InfraDx Knowledge Base
+# schema version: 1
+domain: disk
+
+issues:
+
+  - id: disk-smart-001
+    title: SMART 오류 — 디스크 임박 장애 징후
+    severity: critical
+    category: hardware
+    keywords: [smart, reallocated, "pending sector", uncorrectable, 배드섹터, 불량, 디스크교체]
+    symptoms:
+      - smartctl -a에서 Reallocated_Sector_Ct > 0
+      - Current_Pending_Sector > 0
+      - Offline_Uncorrectable > 0
+      - dmesg에 "ata: exception Emask" 또는 "I/O error"
+    dmesg_patterns:
+      - "ata\\d+: exception Emask"
+      - "SCSI error: return code"
+      - "end_request: I/O error"
+      - "Buffer I/O error"
+    diagnosis_commands:
+      - cmd: "smartctl -a /dev/sdX"
+        purpose: 전체 SMART 데이터 (특히 RAW_VALUE 컬럼)
+      - cmd: "smartctl -t short /dev/sdX && sleep 120 && smartctl -l selftest /dev/sdX"
+        purpose: SMART 자가 테스트 실행 및 결과
+      - cmd: "dmesg -T | grep -iE 'error|ata|scsi|reset|fault' | tail -30"
+        purpose: 커널 디스크 오류 메시지
+      - cmd: "lsblk -o NAME,SIZE,TYPE,ROTA,TRAN"
+        purpose: 디스크 타입 및 인터페이스
+    root_causes:
+      - HDD 기계적 마모 (헤드/플래터)
+      - SSD 쓰기 수명 소진 (wear leveling)
+      - 진동/충격으로 인한 헤드 손상
+      - 전원 불안정 (갑작스런 전원 차단 반복)
+    fix:
+      immediate:
+        - "⚠️ 즉시 전체 데이터 백업 실행"
+        - "해당 디스크 I/O 최소화"
+        - "RAID라면 핫스페어 준비: mdadm /dev/md0 --add /dev/sdY"
+      permanent:
+        - "디스크 교체 (RMA 또는 구매)"
+        - "교체 후 RAID 재구성 완료 확인: watch cat /proc/mdstat"
+    prevention:
+      - "smartd 주간 자가 테스트 + 오류 시 메일 알림"
+      - "Reallocated_Sector_Ct > 0 즉시 알림"
+
+  - id: disk-io-001
+    title: 디스크 I/O 포화 — %util 90% 이상
+    severity: high
+    category: io
+    keywords: [iostat, "%util", await, 포화, saturation, iops, "i/o bottleneck", io병목]
+    symptoms:
+      - iostat -x에서 %util > 90% 지속
+      - await > 20ms (HDD) 또는 > 5ms (SSD)
+      - CPU I/O wait (%wa) 높음
+      - 애플리케이션 응답 지연
+    diagnosis_commands:
+      - cmd: "iostat -xz 1 10"
+        purpose: I/O 사용률, 응답시간, IOPS
+      - cmd: "iotop -b -n 3 | head -20"
+        purpose: I/O 유발 프로세스 상위
+      - cmd: "lsblk -o NAME,SIZE,ROTA,SCHED"
+        purpose: 디스크 타입 및 스케줄러 확인
+      - cmd: "cat /sys/block/sda/queue/scheduler"
+        purpose: 현재 I/O 스케줄러
+    root_causes:
+      - 단일 디스크에 과도한 I/O 집중
+      - 랜덤 I/O 패턴 (DB, 로그 파일)
+      - I/O 스케줄러 미최적화 (SSD에 cfq 사용)
+      - RAID 재구성 중 I/O 경합
+      - vm.dirty_ratio 초과 → 일괄 flush
+    diagnosis_hints:
+      - "r/s + w/s는 높지 않은데 await만 높으면 → 큐잉 문제 또는 스토리지 경로 지연"
+      - "%util ≈ 100% + await 급등 → 완전 포화"
+    fix:
+      immediate:
+        - "I/O 폭주 프로세스 제한: ionice -c 3 -p <pid>"
+        - "dirty cache 강제 flush 중이라면 잠시 대기"
+      permanent:
+        - "SSD I/O 스케줄러 변경: echo none > /sys/block/sdX/queue/scheduler"
+        - "vm.dirty_ratio / vm.dirty_background_ratio 조정"
+        - "디스크 증설 또는 NVMe 업그레이드"
+        - "RAID 레벨 조정 (RAID 10이 RAID 5보다 쓰기 성능 우수)"
+    prevention:
+      - "iostat %util > 70% 알림"
+      - "await > 30ms 알림"
+
+  - id: disk-raid-001
+    title: RAID 어레이 Degraded — 멤버 디스크 실패
+    severity: critical
+    category: raid
+    keywords: [raid, degraded, "mdstat", "failed", 어레이, 재구성, rebuild, 디스크실패]
+    symptoms:
+      - cat /proc/mdstat에서 [UU_] 또는 [U_U] 패턴
+      - mdadm --detail에서 State: degraded
+      - 'dmesg에 "md: ..." 또는 "ata: reset" 메시지'
+    dmesg_patterns:
+      - "md/raid.*: Disk failure"
+      - "md.*: read error"
+      - "md.*: read error NOT corrected"
+    diagnosis_commands:
+      - cmd: "cat /proc/mdstat"
+        purpose: RAID 상태 요약 (UU_ 패턴으로 실패 디스크 위치)
+      - cmd: "mdadm --detail /dev/md0"
+        purpose: 어레이 상세 (각 멤버 상태, 재구성 진행률)
+      - cmd: "smartctl -a /dev/sdX"
+        purpose: 실패 또는 의심 디스크 SMART 상태
+      - cmd: "dmesg -T | grep -iE 'md|ata.*reset|error' | tail -30"
+        purpose: 관련 커널 메시지
+    root_causes:
+      - 디스크 하드웨어 장애 (SMART 오류)
+      - 전원 차단으로 인한 dirty bit
+      - 케이블/컨트롤러 불량으로 일시적 제거
+    fix:
+      immediate:
+        - "실패 디스크 확인: mdadm --detail /dev/md0 | grep failed"
+        - "핫스페어 있으면 자동 재구성 진행 중 — 완료까지 대기"
+        - "핫스페어 없으면 새 디스크 추가: mdadm /dev/md0 --add /dev/sdY"
+      permanent:
+        - "재구성 완료 확인: watch -n 10 cat /proc/mdstat"
+        - "실패 디스크 물리 교체"
+        - "핫스페어 상시 구성"
+    prevention:
+      - "mdadm --monitor 데몬 활성화 + 이메일 알림"
+      - "RAID 상태 모니터링: cat /proc/mdstat | grep -v 'Personalities'"
+
+  - id: disk-fs-001
+    title: 파일시스템 inode 고갈 — No space left (df 정상)
+    severity: high
+    category: filesystem
+    keywords: [inode, "no space left", "no inodes", inode고갈, df, 용량]
+    symptoms:
+      - 파일 생성 실패: "No space left on device"
+      - df -h에서는 여유 공간 있음
+      - df -i에서 IUse% 100%
+    diagnosis_commands:
+      - cmd: "df -i"
+        purpose: 파일시스템별 inode 사용률
+      - cmd: "find / -xdev -printf '%h\n' | sort | uniq -c | sort -rn | head -20"
+        purpose: 디렉토리별 파일 수 (inode 소모 위치)
+      - cmd: "find /tmp /var/log -name '*.log' | wc -l"
+        purpose: 임시/로그 파일 수 확인
+    root_causes:
+      - 소용량 파일 다수 생성 (session 파일, 임시 파일, 썸네일)
+      - 로테이션 안 된 로그 파일 누적
+      - inode 수 부족으로 포맷된 파일시스템
+    fix:
+      immediate:
+        - "불필요 파일 대량 삭제: find /var/log -name '*.log.gz' -mtime +30 -delete"
+        - "임시 파일 정리: find /tmp -mtime +7 -delete"
+      permanent:
+        - "logrotate 주기 단축"
+        - "파일시스템 재포맷 시 inode 수 증가: mkfs.ext4 -N <count> /dev/sdXN"
+        - "tmpfs 사용으로 임시 파일 메모리 처리"
+    prevention:
+      - "df -i의 IUse% > 80% 알림"
+
+  - id: disk-lvm-001
+    title: LVM Thin Pool 100% — 스냅샷/씬 볼륨 자동 비활성화
+    severity: critical
+    category: lvm
+    keywords: [lvm, "thin pool", thinpool, "100%", snapshot, 스냅샷, lvdisplay]
+    symptoms:
+      - '"Thin pool ... is full" 메시지'
+      - 씬 볼륨 자동 비활성화 (lvdisplay에서 active 아님)
+      - Docker/컨테이너 환경에서 자주 발생
+    diagnosis_commands:
+      - cmd: "lvdisplay | grep -A 5 'thin pool'"
+        purpose: Thin pool 사용률 확인
+      - cmd: "lvs -a -o +devices | grep thin"
+        purpose: 씬 볼륨 및 풀 목록
+      - cmd: "dmsetup status | grep thin"
+        purpose: thin pool 상세 상태
+    root_causes:
+      - autoextend 미설정
+      - 스냅샷 데이터 증가
+      - thin-provisioning 과도 할당
+    fix:
+      immediate:
+        - "thin pool 확장: lvextend -L +10G /dev/<vg>/<thinpool>"
+        - "불필요 스냅샷 삭제: lvremove /dev/<vg>/<snapshot>"
+      permanent:
+        - "autoextend 설정: lvm.conf의 thin_pool_autoextend_threshold=80, percent=20"
+        - "씬 풀 용량 계획 재수립"
+    prevention:
+      - "thin pool Data% > 80% 알림"
+
+  - id: disk-san-001
+    title: SAN/iSCSI 경로 장애 — 멀티패스 경로 감소
+    severity: critical
+    category: san
+    keywords: [san, iscsi, multipath, "path failure", fc, 경로장애, 멀티패스, lun]
+    symptoms:
+      - multipath -ll에서 특정 경로 faulty 또는 offline
+      - dmesg에 "SCSI error" 또는 "multipathd: ... failed"
+      - I/O 지연 급증 (경로 전환 중)
+    diagnosis_commands:
+      - cmd: "multipath -ll"
+        purpose: 멀티패스 경로 전체 상태
+      - cmd: "multipathd -k'show paths'"
+        purpose: 경로별 상태 상세
+      - cmd: "iscsiadm -m session -P 3 | grep -iE 'state|error|timeout'"
+        purpose: iSCSI 세션 상태
+      - cmd: "dmesg -T | grep -iE 'scsi|multipathd|fc' | tail -20"
+        purpose: 관련 커널/멀티패스 메시지
+      - cmd: "systool -c fc_host -v | grep -E 'port_state|speed'"
+        purpose: FC HBA 포트 상태 (FC 환경)
+    root_causes:
+      - FC 스위치 포트 오류 또는 SFP 장애
+      - iSCSI 네트워크 경로 단절
+      - 스토리지 컨트롤러 failover
+      - HBA 드라이버 오류
+    fix:
+      immediate:
+        - "오류 경로 재활성화: multipathd -k'reinstate path <dev>'"
+        - "iSCSI 세션 재연결: iscsiadm -m session -R"
+      permanent:
+        - "FC 케이블/SFP 교체"
+        - "HBA 드라이버 업데이트"
+        - "스토리지 벤더 지원 연락"
+    prevention:
+      - "멀티패스 경로 수 감소 시 즉시 알림"
+      - "multipathd 데몬 상태 모니터링"
+
+  - id: disk-nvme-001
+    title: NVMe SSD 과열 — Thermal Throttling
+    severity: high
+    category: hardware
+    keywords: [nvme, thermal, throttle, temperature, 과열, 온도, 쓰로틀링]
+    symptoms:
+      - I/O 성능이 간헐적으로 급격히 저하
+      - nvme smart-log에서 온도 경고
+      - dmesg에 "nvme: critical warning" 메시지
+    dmesg_patterns:
+      - "nvme.*: critical warning"
+      - "nvme.*: Asynchronous Event"
+    diagnosis_commands:
+      - cmd: "nvme smart-log /dev/nvme0 | grep -iE 'temperature|warning|throttle'"
+        purpose: NVMe SMART 온도 및 경고
+      - cmd: "nvme smart-log /dev/nvme0 | grep 'Thermal_Throttle'"
+        purpose: 열 쓰로틀링 발생 횟수
+      - cmd: "sensors | grep -i nvme 2>/dev/null || nvme smart-log /dev/nvme0"
+        purpose: 현재 온도
+    root_causes:
+      - 서버 케이스 냉각 불량
+      - 히트싱크 미장착 (M.2 폼팩터)
+      - 장시간 고부하 I/O
+    fix:
+      immediate:
+        - "I/O 부하 일시 감소"
+        - "서버 팬 속도 최대 설정"
+      permanent:
+        - "M.2 히트싱크 추가"
+        - "서버 케이스 에어플로우 개선"
+        - "U.2 폼팩터 NVMe로 교체 (더 나은 냉각)"
+    prevention:
+      - "NVMe 온도 > 70°C 알림"

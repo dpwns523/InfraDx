@@ -1,0 +1,241 @@
+# Network Known Issues — InfraDx Knowledge Base
+# schema version: 1
+domain: network
+
+issues:
+
+  - id: net-l3-001
+    title: 비대칭 라우팅으로 인한 간헐적 패킷 손실
+    severity: high
+    category: routing
+    keywords: [asymmetric, routing, "packet loss", 비대칭, 라우팅, mtu, 간헐적손실]
+    symptoms:
+      - ping은 성공하지만 TCP 세션이 간헐적으로 끊김
+      - 특정 방향 트래픽만 손실
+      - traceroute 송/수신 경로가 다름
+    diagnosis_commands:
+      - cmd: "mtr --report --report-cycles 30 <target>"
+        purpose: 양방향 경로 및 손실 확인
+      - cmd: "traceroute -n <target> && traceroute -n -I <target>"
+        purpose: TCP/ICMP 경로 비교
+      - cmd: "ip route get <target>"
+        purpose: 현재 라우팅 경로
+      - cmd: "ss -tn state established | head -20"
+        purpose: 현재 TCP 세션 상태
+    root_causes:
+      - 멀티홈 환경에서 정책 라우팅 미설정
+      - 방화벽의 stateful inspection에서 비대칭 경로 차단
+      - ECMP(Equal-Cost Multi-Path) 해시 불균형
+    fix:
+      immediate:
+        - "특정 소스에 정책 라우팅 강제: ip rule add from <src> table <table>"
+      permanent:
+        - "ip rule + ip route table로 소스 기반 라우팅 설정"
+        - "방화벽 conntrack asymmetric route 허용 설정"
+    prevention:
+      - "네트워크 경로 변경 시 양방향 테스트 필수"
+
+  - id: net-l3-002
+    title: MTU 불일치 — Black Hole 라우팅
+    severity: high
+    category: routing
+    keywords: [mtu, "black hole", pmtud, "path mtu", 단편화, fragmentation, 블랙홀]
+    symptoms:
+      - 소용량 패킷(ping)은 성공, 대용량 전송 실패
+      - SSH 접속은 되지만 화면 출력이 멈춤
+      - HTTP GET은 성공, 큰 파일 다운로드 실패
+    diagnosis_commands:
+      - cmd: "ping -M do -s 1400 <target>"
+        purpose: MTU 1400 단편화 금지 ping (성공/실패로 MTU 추정)
+      - cmd: "ping -M do -s 1472 <target>"
+        purpose: MTU 1500 (1472 + 28 IP/ICMP 헤더) 테스트
+      - cmd: "ip link show | grep mtu"
+        purpose: 인터페이스별 MTU 확인
+      - cmd: "tcpdump -i <iface> -nn icmp"
+        purpose: ICMP Fragmentation Needed 패킷 확인
+    root_causes:
+      - VPN/터널(GRE, IPsec) 오버헤드로 유효 MTU 감소
+      - 중간 장비가 ICMP Type 3 Code 4 차단 → PMTUD 실패
+      - 점보 프레임 미지원 구간 혼재
+    fix:
+      immediate:
+        - "임시: 애플리케이션 TCP MSS 조정"
+        - "iptables TCP MSS clamping: iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+      permanent:
+        - "인터페이스 MTU 조정: ip link set <iface> mtu 1450"
+        - "중간 방화벽에서 ICMP Type 3 허용"
+    prevention:
+      - "경로 변경 후 MTU 테스트 자동화"
+
+  - id: net-l2-001
+    title: 스패닝 트리 토폴로지 변경 — STP Topology Change
+    severity: critical
+    category: switching
+    keywords: [stp, "spanning tree", "topology change", tcn, bpdu, 루프, 스패닝트리]
+    symptoms:
+      - 네트워크 전체 30초~수분간 연결 불가
+      - 스위치 로그에 "Topology Change" 메시지
+      - 여러 VLAN 동시에 영향
+      - MAC 주소 테이블 플러시 반복
+    diagnosis_commands:
+      - cmd: "show spanning-tree detail | grep 'topology change'"
+        purpose: STP 토폴로지 변경 횟수 및 시간
+      - cmd: "show spanning-tree | grep -E 'Root|Designated'"
+        purpose: Root Bridge 위치 확인
+      - cmd: "show interfaces | grep 'input errors'"
+        purpose: 물리 인터페이스 오류
+    root_causes:
+      - 새 스위치 추가로 Root Bridge 재선출 (Bridge Priority 미설정)
+      - 엣지 포트(PC, 서버)에 PortFast 미설정
+      - 물리 링크 flap (케이블/포트 불량)
+      - 브리지 루프 형성
+    fix:
+      immediate:
+        - "Root Bridge Priority 고정: spanning-tree vlan <id> priority 4096"
+        - "문제 포트 shutdown"
+      permanent:
+        - "모든 엣지 포트에 PortFast + BPDU Guard 설정"
+        - "Root/Backup Root Bridge 명시적 지정"
+        - "RSTP(802.1w) 또는 MSTP로 마이그레이션"
+    prevention:
+      - "STP Topology Change 발생 시 알림"
+      - "새 장비 연결 전 STP 영향 검토"
+
+  - id: net-l4-001
+    title: TCP 재전송 폭증 — 네트워크 혼잡 또는 손실
+    severity: high
+    category: tcp
+    keywords: [retransmit, "tcp retransmit", 재전송, 혼잡, congestion, 지연, latency]
+    symptoms:
+      - netstat -s에서 segments retransmitted 빠르게 증가
+      - 애플리케이션 응답 지연 (타임아웃 증가)
+      - Wireshark/tcpdump에서 TCP Retransmission 다수
+    diagnosis_commands:
+      - cmd: "netstat -s | grep -iE 'retransmit|fail|reset'"
+        purpose: TCP 재전송/오류 통계
+      - cmd: "ss -tin | grep retrans"
+        purpose: 소켓별 재전송 수
+      - cmd: "tcpdump -i <iface> -nn 'tcp[tcpflags] & tcp-push != 0' -c 100"
+        purpose: TCP 세션 상태 캡처
+      - cmd: "ip -s link show <iface>"
+        purpose: 인터페이스 오류/드롭 통계
+    root_causes:
+      - 네트워크 구간 혼잡 (업링크 대역폭 포화)
+      - NIC TX/RX 큐 드롭 (링버퍼 부족)
+      - 물리 링크 오류 (케이블/SFP)
+      - TCP 버퍼 크기 부족
+    fix:
+      immediate:
+        - "NIC 링버퍼 확장: ethtool -G <iface> rx 4096 tx 4096"
+      permanent:
+        - "TCP 버퍼 최적화: sysctl net.core.rmem_max=16777216 net.core.wmem_max=16777216"
+        - "대역폭 업그레이드 또는 QoS 정책 적용"
+        - "물리 링크 점검"
+    prevention:
+      - "NIC drop 카운터 증가율 모니터링"
+      - "네트워크 대역폭 사용률 > 80% 알림"
+
+  - id: net-l4-002
+    title: 방화벽 연결 테이블 고갈 — Conntrack Table Full
+    severity: critical
+    category: firewall
+    keywords: [conntrack, "connection table", "nf_conntrack", 방화벽, "table full", 연결테이블]
+    symptoms:
+      - '"nf_conntrack: table full, dropping packet" 커널 메시지'
+      - 새 TCP 연결 수립 실패 (기존 연결은 유지)
+      - 방화벽 통과 트래픽만 영향, bypass 트래픽은 정상
+    diagnosis_commands:
+      - cmd: "cat /proc/sys/net/netfilter/nf_conntrack_count"
+        purpose: 현재 conntrack 수
+      - cmd: "cat /proc/sys/net/netfilter/nf_conntrack_max"
+        purpose: conntrack 최대 한도
+      - cmd: "dmesg | grep conntrack | tail -10"
+        purpose: 커널 conntrack 경고
+      - cmd: "conntrack -L | wc -l"
+        purpose: 실제 추적 연결 수
+    root_causes:
+      - nf_conntrack_max 기본값이 트래픽 대비 부족
+      - UDP 기반 고빈도 트래픽 (DNS, syslog)
+      - DDoS 또는 연결 폭증
+    fix:
+      immediate:
+        - "conntrack 한도 즉시 확장: sysctl -w net.netfilter.nf_conntrack_max=524288"
+        - "불필요 연결 정리: conntrack -F"
+      permanent:
+        - "/etc/sysctl.conf에 영구 설정"
+        - "UDP 타임아웃 단축: sysctl net.netfilter.nf_conntrack_udp_timeout=30"
+        - "고빈도 UDP는 NOTRACK 규칙으로 conntrack 제외"
+    prevention:
+      - "conntrack 사용률 > 80% 알림"
+
+  - id: net-dns-001
+    title: DNS 해석 실패 또는 응답 지연
+    severity: high
+    category: dns
+    keywords: [dns, "name resolution", "resolv.conf", "dns timeout", dns실패, 이름해석]
+    symptoms:
+      - curl/wget에서 호스트명 해석 실패
+      - 애플리케이션 타임아웃 (IP 직접 접근은 성공)
+      - dig 응답이 수초 이상 지연
+    diagnosis_commands:
+      - cmd: "dig +time=3 <hostname>"
+        purpose: DNS 응답 시간 및 결과
+      - cmd: "cat /etc/resolv.conf"
+        purpose: DNS 서버 설정 확인
+      - cmd: "dig @8.8.8.8 <hostname>"
+        purpose: 외부 DNS로 직접 질의 (내부 DNS 우회)
+      - cmd: "systemctl status systemd-resolved"
+        purpose: systemd-resolved 상태
+      - cmd: "ss -un | grep ':53'"
+        purpose: DNS UDP 소켓 상태
+    root_causes:
+      - resolv.conf DNS 서버 다운
+      - DNS 서버 과부하 (응답 지연)
+      - ndots 설정으로 인한 불필요한 search domain 질의
+      - nscd 캐시 오염
+    fix:
+      immediate:
+        - "resolv.conf에 fallback DNS 추가: echo 'nameserver 8.8.8.8' >> /etc/resolv.conf"
+        - "nscd 캐시 초기화: nscd -i hosts"
+      permanent:
+        - "DNS 서버 이중화 (primary + secondary)"
+        - "ndots 줄이기: options ndots:2"
+        - "로컬 DNS 캐시 설치 (unbound, dnsmasq)"
+    prevention:
+      - "DNS 응답시간 > 100ms 알림"
+      - "DNS 서버 가용성 모니터링"
+
+  - id: net-bgp-001
+    title: BGP 세션 단절 — Peer Down
+    severity: critical
+    category: routing
+    keywords: [bgp, "peer down", "bgp session", "hold timer", flap, bgp단절]
+    symptoms:
+      - 라우터 로그에 "BGP peer X.X.X.X went down"
+      - 해당 피어 경유 경로 전체 소실
+      - 트래픽 블랙홀 또는 우회 경로로 급격한 지연 증가
+    diagnosis_commands:
+      - cmd: "show bgp summary"
+        purpose: BGP 피어 상태 (Up/Down, prefixes)
+      - cmd: "show bgp neighbors <peer-ip>"
+        purpose: BGP 피어 상세 (Hold time, Error code)
+      - cmd: "ping <peer-ip> source <local-ip>"
+        purpose: BGP 피어 IP 연결성
+      - cmd: "show interfaces <iface> | include error|reset"
+        purpose: 하위 인터페이스 오류
+    root_causes:
+      - Hold Timer 만료 (keepalive 손실 3회)
+      - BGP 피어 IP 연결성 단절
+      - Notification 수신 (Error Code 확인 필수)
+      - CPU 과부하로 keepalive 처리 지연
+    fix:
+      immediate:
+        - "BGP 피어 재설정: clear ip bgp <peer-ip> soft"
+        - "하드 리셋 (경로 재수신): clear ip bgp <peer-ip>"
+      permanent:
+        - "BFD(Bidirectional Forwarding Detection) 활성화로 빠른 감지"
+        - "Hold Timer 조정: timers bgp 10 30"
+        - "물리 링크 이중화 확인"
+    prevention:
+      - "BGP 세션 상태 변경 SNMP trap / syslog 알림"
+      - "BGP prefix 수 급감 시 알림"
