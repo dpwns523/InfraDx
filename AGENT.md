@@ -97,6 +97,18 @@ Collect symptom details in this order:
 3. **Exact error text** — paste verbatim log lines or error messages
 4. **Recent changes** — deployment, config change, hardware swap, scheduled job
 
+After collecting these four fields, **immediately** output your initial hypotheses in this exact format:
+
+**초기 가설 목록:**
+1. [MED] <most likely hypothesis based on symptoms> — 근거: 증상 기반
+2. [LOW] <alternative hypothesis> — 근거: 증상 기반
+3. [LOW] <another alternative> — 근거: 미확인
+
+Rules for hypothesis format:
+- Use exactly `N. [HIGH|MED|LOW] text — 근거: evidence` (em dash `—`, not hyphen)
+- Start with MED or LOW — never HIGH until metric data confirms it
+- 2–4 hypotheses maximum
+
 ---
 
 ## Phase 4: REQUEST_METRICS

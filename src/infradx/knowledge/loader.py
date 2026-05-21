@@ -34,18 +34,21 @@ class KnowledgeEntry:
 
     def to_context_block(self) -> str:
         """Format entry as a compact context block for injection into AI prompt."""
+        def _safe_str(items: list) -> str:
+            return " / ".join(str(i) for i in items if isinstance(i, (str, int, float)))
+
         severity_badge = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "⚪"}.get(
             self.severity, ""
         )
         lines = [
             f"### [{self.id}] {severity_badge} {self.title}",
-            f"**관련 증상:** {' / '.join(self.symptoms[:3])}",
+            f"**관련 증상:** {_safe_str(self.symptoms[:3])}",
         ]
         if self.dmesg_patterns:
-            lines.append(f"**dmesg 패턴:** `{'` `'.join(self.dmesg_patterns[:3])}`")
+            lines.append(f"**dmesg 패턴:** `{'` `'.join(str(p) for p in self.dmesg_patterns[:3])}`")
         if self.errpt_patterns:
-            lines.append(f"**errpt 패턴:** `{'` `'.join(self.errpt_patterns[:2])}`")
-        lines.append(f"**주요 원인:** {' / '.join(self.root_causes[:2])}")
+            lines.append(f"**errpt 패턴:** `{'` `'.join(str(p) for p in self.errpt_patterns[:2])}`")
+        lines.append(f"**주요 원인:** {_safe_str(self.root_causes[:2])}")
         lines.append(f"**즉각 조치:** {self.fix_immediate[0]}" if self.fix_immediate else "")
         if self.diagnosis_hints:
             lines.append(f"**진단 힌트:** {self.diagnosis_hints[0]}")
@@ -127,10 +130,11 @@ class KnowledgeBase:
         domain: str | None = None,
         os_type: str | None = None,
         top_n: int = 3,
+        min_score: float = 0.0,
     ) -> list[KnowledgeEntry]:
         """
         Keyword search over title, keywords, symptoms, dmesg_patterns.
-        Returns top_n entries ranked by match score.
+        Returns top_n entries ranked by match score, filtered by min_score.
         """
         if not self._loaded:
             self.load()
@@ -155,7 +159,7 @@ class KnowledgeBase:
                 continue
 
             score = self._score(query_tokens, entry)
-            if score > 0:
+            if score >= min_score and score > 0:
                 scored.append((score, entry))
 
         scored.sort(key=lambda x: x[0], reverse=True)

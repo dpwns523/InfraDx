@@ -1,24 +1,69 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import AsyncIterator, Protocol
 
-from infradx.state.session import Session, Phase
+from infradx.state.session import Session, Phase, Hypothesis
 from infradx.knowledge import get_knowledge_base
+
+# Matches: "1. [HIGH] text — 근거: evidence" (em-dash or hyphen variants)
+_HYPO_RE = re.compile(
+    r"^\d+\.\s*\[(HIGH|MED|LOW)\]\s*(.+?)\s*[—\-–]\s*근거:\s*(.+?)$",
+    re.MULTILINE,
+)
+# Matches: "**근본 원인:** text"
+_ROOT_CAUSE_RE = re.compile(r"\*\*근본 원인:\*\*\s*(.+?)$", re.MULTILINE)
 
 _SKILLS_DIR = Path(__file__).parent.parent.parent.parent / "skills"
 _AGENT_MD = Path(__file__).parent.parent.parent.parent / "AGENT.md"
 
+# ── ① Phase-based skill loading ──────────────────────────────────────────────
+# Only load skills relevant to the current phase (+ one ahead for context).
+# Reduces system prompt from ~7K to ~2–4K tokens depending on phase.
 
-def _load_system_prompt() -> str:
+_PHASE_SKILLS: dict[Phase, list[str]] = {
+    Phase.CLASSIFY:         ["classify"],
+    Phase.GATHER_SPEC:      ["classify", "gather-context"],
+    Phase.DESCRIBE_SYMPTOM: ["gather-context"],
+    Phase.REQUEST_METRICS:  ["request-metrics"],
+    Phase.ANALYZE:          ["analyze", "request-metrics"],
+    Phase.HYPOTHESIZE:      ["hypothesize", "analyze"],
+    Phase.REPRODUCE:        ["reproduce", "hypothesize"],
+    Phase.RECOMMEND:        ["recommend", "reproduce"],
+}
+
+# ── ② KB injection gating ────────────────────────────────────────────────────
+# Only inject KB context in phases where it actually helps diagnosis.
+# Score threshold avoids injecting loosely matched entries.
+
+_KB_ACTIVE_PHASES = {
+    Phase.REQUEST_METRICS,
+    Phase.ANALYZE,
+    Phase.HYPOTHESIZE,
+}
+_KB_MIN_SCORE = 3.0
+
+# ── ③ History sliding window ─────────────────────────────────────────────────
+# Send at most this many messages. context_prefix carries session state,
+# so old turns are redundant once hypotheses and spec are collected.
+
+_MAX_HISTORY = 12  # 6 user+assistant turn pairs
+
+
+def _load_agent_md() -> str:
+    return _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
+
+
+def _load_skills(names: list[str]) -> str:
     parts: list[str] = []
-    if _AGENT_MD.exists():
-        parts.append(_AGENT_MD.read_text())
-    for skill_file in sorted(_SKILLS_DIR.glob("*.md")):
-        parts.append(f"\n\n---\n# Skill: {skill_file.stem}\n")
-        parts.append(skill_file.read_text())
-    return "\n".join(parts)
+    for name in names:
+        path = _SKILLS_DIR / f"{name}.md"
+        if path.exists():
+            parts.append(f"\n\n---\n# Skill: {name}\n")
+            parts.append(path.read_text())
+    return "".join(parts)
 
 
 class _Backend(Protocol):
@@ -100,7 +145,7 @@ _PROVIDER_INSTALL = {
 
 
 def _make_backend() -> _AnthropicBackend | _OpenAIBackend:
-    provider = os.environ.get("INFRADX_PROVIDER", "anthropic").lower()
+    provider = os.environ.get("INFRADX_PROVIDER", "openai").lower()
     cls = _PROVIDERS.get(provider)
     if cls is None:
         raise RuntimeError(
@@ -122,24 +167,41 @@ def _make_backend() -> _AnthropicBackend | _OpenAIBackend:
 class AgentCore:
     def __init__(self) -> None:
         self._backend = _make_backend()
-        self._system_prompt = _load_system_prompt()
+        self._agent_md = _load_agent_md()
+        # Pre-load all skill files into a cache
+        self._skill_cache: dict[str, str] = {}
+        for path in _SKILLS_DIR.glob("*.md"):
+            self._skill_cache[path.stem] = path.read_text()
         self._kb = get_knowledge_base()
+
+    def _build_system_prompt(self, phase: Phase) -> str:
+        """Build a phase-appropriate system prompt (AGENT.md + relevant skills only)."""
+        skill_names = _PHASE_SKILLS.get(phase, [])
+        skill_parts: list[str] = []
+        for name in skill_names:
+            if name in self._skill_cache:
+                skill_parts.append(f"\n\n---\n# Skill: {name}\n")
+                skill_parts.append(self._skill_cache[name])
+        return self._agent_md + "".join(skill_parts)
 
     async def stream_response(
         self, session: Session, user_message: str
     ) -> AsyncIterator[str]:
         session.add_message("user", user_message)
 
+        system = self._build_system_prompt(session.phase)
         context_prefix = self._build_context_prefix(session)
         messages = self._build_messages(session, context_prefix)
 
         full_response = ""
-        async for chunk in self._backend.stream(self._system_prompt, messages):
+        async for chunk in self._backend.stream(system, messages):
             full_response += chunk
             yield chunk
 
         session.add_message("assistant", full_response)
         self._update_session_phase(session, full_response)
+        self._parse_hypotheses(session, full_response)
+        self._parse_root_cause(session, full_response)
 
     def _build_context_prefix(self, session: Session) -> str:
         lines = [
@@ -155,7 +217,6 @@ class AgentCore:
             if top:
                 lines.append(f"[Top hypothesis ({top.confidence}): {top.text}]")
 
-        # Inject relevant knowledge base entries
         kb_context = self._build_kb_context(session)
         if kb_context:
             lines.append(kb_context)
@@ -163,10 +224,11 @@ class AgentCore:
         return "\n".join(lines)
 
     def _build_kb_context(self, session: Session) -> str:
-        """Search KB for entries relevant to the current session state."""
-        query_parts: list[str] = []
+        """Inject KB only in diagnostic phases and only when score is high enough."""
+        if session.phase not in _KB_ACTIVE_PHASES:
+            return ""
 
-        # Build search query from session state
+        query_parts: list[str] = []
         if session.symptom.error_text:
             query_parts.append(session.symptom.error_text[:200])
         if session.hypotheses:
@@ -179,7 +241,6 @@ class AgentCore:
         if not query_parts:
             return ""
 
-        # Enrich query with cloud/k8s spec context
         if session.spec.cloud_provider:
             query_parts.append(session.spec.cloud_provider)
         if session.spec.cloud_service:
@@ -190,17 +251,14 @@ class AgentCore:
             query_parts.append(session.spec.k8s_problem_scope)
 
         query = " ".join(query_parts)
-
-        # For kubernetes/cloud domains, search with os_type override
-        search_os = session.spec.os_type
-        if session.domain in ("kubernetes", "cloud"):
-            search_os = None  # don't filter by OS for these domains
+        search_os = None if session.domain in ("kubernetes", "cloud") else session.spec.os_type
 
         entries = self._kb.search(
             query=query,
-            domain="server",  # kubernetes/cloud entries are filed under server domain
+            domain="server",
             os_type=search_os,
             top_n=2,
+            min_score=_KB_MIN_SCORE,
         )
 
         if not entries:
@@ -209,17 +267,51 @@ class AgentCore:
         blocks = ["[Knowledge Base — 관련 알려진 이슈:]"]
         for entry in entries:
             blocks.append(entry.to_context_block())
-
         return "\n".join(blocks)
 
     def _build_messages(self, session: Session, context_prefix: str) -> list[dict]:
-        messages: list[dict] = []
-        for i, msg in enumerate(session.messages):
+        """Send only the last _MAX_HISTORY messages; context_prefix carries session state."""
+        all_messages = session.messages
+        window = all_messages[-_MAX_HISTORY:] if len(all_messages) > _MAX_HISTORY else all_messages
+        last_idx = len(window) - 1
+
+        result: list[dict] = []
+        for i, msg in enumerate(window):
             content = msg["content"]
-            if msg["role"] == "user" and i == len(session.messages) - 1:
+            if msg["role"] == "user" and i == last_idx:
                 content = f"{context_prefix}\n\n{content}"
-            messages.append({"role": msg["role"], "content": content})
-        return messages
+            result.append({"role": msg["role"], "content": content})
+        return result
+
+    def _parse_hypotheses(self, session: Session, response: str) -> None:
+        matches = _HYPO_RE.findall(response)
+        if not matches:
+            return
+        new_hypos: list[Hypothesis] = []
+        for conf, text, evidence in matches:
+            text = text.strip()
+            evidence = evidence.strip()
+            existing = next(
+                (h for h in session.hypotheses if h.text[:25] in text or text[:25] in h.text),
+                None,
+            )
+            status = existing.status if existing else "investigating"
+            new_hypos.append(Hypothesis(text=text, confidence=conf, evidence=evidence, status=status))
+        if new_hypos:
+            session.hypotheses = new_hypos
+
+    def _parse_root_cause(self, session: Session, response: str) -> None:
+        match = _ROOT_CAUSE_RE.search(response)
+        if not match:
+            return
+        session.root_cause = match.group(1).strip()
+        root_words = set(session.root_cause.lower().split())
+        for h in session.hypotheses:
+            overlap = root_words & set(h.text.lower().split())
+            if len(overlap) >= 2:
+                h.status = "validated"
+            elif h.status == "investigating":
+                h.status = "invalidated"
 
     def _update_session_phase(self, session: Session, response: str) -> None:
         response_lower = response.lower()

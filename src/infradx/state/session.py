@@ -24,6 +24,7 @@ class Hypothesis:
     text: str
     confidence: Literal["HIGH", "MED", "LOW"]
     evidence: str
+    status: Literal["investigating", "validated", "invalidated"] = "investigating"
 
 
 @dataclass

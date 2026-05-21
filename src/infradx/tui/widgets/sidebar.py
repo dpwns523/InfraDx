@@ -118,10 +118,15 @@ class SidebarPanel(Widget):
         # Update hypotheses
         hypo_display = self.query_one("#hypothesis-display", Static)
         if session.hypotheses:
-            lines = []
-            for h in session.hypotheses[:3]:
-                badge = {"HIGH": "🔴", "MED": "🟡", "LOW": "⚪"}.get(h.confidence, "")
-                lines.append(f"{badge} [{h.confidence}] {h.text[:40]}")
+            lines: list[str] = []
+            _status_icon = {"validated": "✅", "invalidated": "❌", "investigating": "🔄"}
+            _conf_badge = {"HIGH": "🔴", "MED": "🟡", "LOW": "⚪"}
+            for h in session.hypotheses[:4]:
+                s_icon = _status_icon.get(h.status, "🔄")
+                c_badge = _conf_badge.get(h.confidence, "")
+                lines.append(f"{s_icon} {c_badge} {h.text[:35]}")
+                if h.evidence and h.status == "investigating":
+                    lines.append(f"   └ {h.evidence[:38]}")
             hypo_display.update("\n".join(lines))
         elif session.root_cause:
             hypo_display.update(f"✅ {session.root_cause[:60]}")
