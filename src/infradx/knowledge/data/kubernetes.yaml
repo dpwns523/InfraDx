@@ -1,0 +1,214 @@
+# Kubernetes Known Issues — InfraDx Knowledge Base
+# schema version: 1
+domain: server
+os: kubernetes
+
+issues:
+
+  - id: k8s-pod-001
+    title: CrashLoopBackOff — 필수 환경변수 누락
+    severity: critical
+    category: pod
+    keywords: [crashloopbackoff, "crash loop", "exit code 1", envvar, configmap, 환경변수, 크래시루프]
+    symptoms:
+      - kubectl get pods에서 STATUS가 CrashLoopBackOff
+      - RESTARTS 수가 빠르게 증가 (5회 이상)
+      - 컨테이너가 시작 2초 내에 종료 (이미지 pull은 성공)
+    diagnosis_commands:
+      - cmd: "kubectl get pods -n <namespace>"
+        purpose: Pod 상태 및 재시작 횟수
+      - cmd: "kubectl describe pod <pod-name> -n <namespace>"
+        purpose: 이벤트 및 종료 원인 (Exit Code, Reason)
+      - cmd: "kubectl logs <pod-name> -n <namespace> --previous"
+        purpose: 이전 크래시 시의 로그 (현재 로그가 없을 때)
+      - cmd: "kubectl get configmap <name> -n <namespace> -o yaml"
+        purpose: ConfigMap 키 목록 확인
+    root_causes:
+      - 신버전 애플리케이션이 필요로 하는 환경변수가 Deployment spec에 없음
+      - ConfigMap/Secret 업데이트 없이 이미지만 버전 업
+      - 환경변수 이름 오타 (대소문자 포함)
+    fix:
+      immediate:
+        - "로그에서 누락된 환경변수명 확인: kubectl logs <pod> --previous | grep -i 'env\\|variable\\|required'"
+        - "ConfigMap에 키 추가: kubectl edit configmap <name> -n <namespace>"
+        - "Deployment에 env 항목 추가 후 재배포: kubectl rollout restart deployment/<name>"
+      permanent:
+        - "Helm/Kustomize로 ConfigMap과 Deployment를 함께 버전 관리"
+        - "배포 전 환경변수 체크리스트 또는 helm lint 실행"
+    diagnosis_hints:
+      - "Exit Code 1은 애플리케이션 초기화 실패, Exit Code 137은 OOM Kill"
+      - "--previous 옵션 없으면 이미 재시작된 컨테이너 로그는 사라짐"
+    prevention:
+      - "스테이징 환경에서 동일 ConfigMap으로 검증 후 프로덕션 배포"
+
+  - id: k8s-pod-002
+    title: ImagePullBackOff — 존재하지 않는 이미지 태그
+    severity: high
+    category: pod
+    keywords: [imagepullbackoff, "image pull", "not found", tag, registry, 이미지, 태그오류]
+    symptoms:
+      - kubectl get pods에서 STATUS가 ImagePullBackOff 또는 ErrImagePull
+      - Pod이 Pending 상태에서 진행되지 않음
+      - kubectl describe에서 "failed to pull image ... not found" 메시지
+    diagnosis_commands:
+      - cmd: "kubectl describe pod <pod-name> | grep -A 5 Events"
+        purpose: 이미지 pull 실패 이벤트 및 오류 메시지
+      - cmd: "kubectl get pod <pod-name> -o jsonpath='{.spec.containers[*].image}'"
+        purpose: 실제 사용 중인 이미지 태그 확인
+    root_causes:
+      - 이미지 태그 오타 (예: nginx:1.25.12-alpine — 존재하지 않는 버전)
+      - Private registry 접근 시 imagePullSecret 누락
+      - 레지스트리 URL 오류 또는 네트워크 접근 불가
+    fix:
+      immediate:
+        - "유효한 태그 확인 후 Deployment 수정: kubectl set image deployment/<name> <container>=nginx:1.25.4-alpine"
+        - "Private registry라면 Secret 생성: kubectl create secret docker-registry regcred --docker-server=<서버> --docker-username=<유저> --docker-password=<패스워드>"
+      permanent:
+        - "CI/CD에서 이미지 존재 여부 확인 후 배포"
+        - "latest 태그 사용 지양 — 항상 고정 버전 태그 사용"
+    diagnosis_hints:
+      - "ErrImagePull은 첫 실패, ImagePullBackOff는 재시도 중 — 같은 원인"
+      - "오류 메시지에 '401 Unauthorized'가 있으면 인증 문제, 'not found'면 태그 문제"
+
+  - id: k8s-pod-003
+    title: OOMKilled — Pod 메모리 한도 초과
+    severity: critical
+    category: memory
+    keywords: [oomkilled, "exit code 137", "memory limit", "out of memory", oom, 메모리한도, "137"]
+    symptoms:
+      - kubectl describe pod에서 Last State가 OOMKilled
+      - Exit Code 137 (SIGKILL from kernel OOM)
+      - CrashLoopBackOff로 이어짐 — 재시작 후 동일 증상 반복
+      - 컨테이너가 시작 수 초~수십 초 내에 종료
+    diagnosis_commands:
+      - cmd: "kubectl describe pod <pod-name> | grep -A 3 'Last State'"
+        purpose: 종료 이유 및 Exit Code 확인
+      - cmd: "kubectl top pod <pod-name> -n <namespace>"
+        purpose: 현재 메모리 사용량 (metrics-server 필요)
+      - cmd: "kubectl get pod <pod-name> -o jsonpath='{.spec.containers[*].resources}'"
+        purpose: 설정된 requests/limits 확인
+    root_causes:
+      - 컨테이너 memory limit이 실제 애플리케이션 요구량보다 낮게 설정
+      - 메모리 누수로 인한 점진적 증가
+      - JVM/Node.js heap 설정이 컨테이너 limit보다 과다
+    fix:
+      immediate:
+        - "limits.memory 상향 조정: kubectl edit deployment <name> → resources.limits.memory: '256Mi'"
+        - "kubectl rollout restart deployment/<name>으로 재배포"
+      permanent:
+        - "kubectl top으로 실제 메모리 피크 측정 후 limit 설정 (피크 * 1.5)"
+        - "JVM: -Xmx를 컨테이너 limit의 75% 이하로 설정"
+        - "Node.js: --max-old-space-size를 limit MB의 75% 이하로 설정"
+    diagnosis_hints:
+      - "Exit Code 137 = 128 + SIGKILL(9) — 항상 OOM 또는 외부 kill"
+      - "requests와 limits 차이가 크면 노드 메모리 압박 시 먼저 퇴거될 수 있음"
+    prevention:
+      - "Vertical Pod Autoscaler(VPA)로 적정 리소스 자동 권고"
+      - "메모리 limit 초과율 > 80% 시 알림"
+
+  - id: k8s-pod-004
+    title: Readiness Probe 실패 — 포트/경로 불일치
+    severity: high
+    category: networking
+    keywords: [readiness, probe, "connection refused", "0/1", ready, 헬스체크, 프로브, 포트불일치]
+    symptoms:
+      - kubectl get pods에서 READY가 0/1 (Running이지만 Ready 아님)
+      - Service Endpoint에서 Pod이 제외되어 트래픽 미수신
+      - kubectl describe에서 "Readiness probe failed: connection refused :<wrong-port>"
+    diagnosis_commands:
+      - cmd: "kubectl describe pod <pod-name> | grep -A 10 'Readiness'"
+        purpose: Readiness probe 설정 및 실패 메시지 확인
+      - cmd: "kubectl exec <pod-name> -- netstat -tlnp"
+        purpose: 컨테이너 내부에서 실제 리스닝 포트 확인
+      - cmd: "kubectl get endpoints <service-name>"
+        purpose: Service에 연결된 Pod IP 목록 (0이면 Ready Pod 없음)
+    root_causes:
+      - Deployment의 readinessProbe.port가 컨테이너 실제 리스닝 포트와 다름
+      - readinessProbe.path가 존재하지 않는 엔드포인트 지정
+      - 애플리케이션 초기화 시간이 initialDelaySeconds보다 길어 조기 실패
+    fix:
+      immediate:
+        - "컨테이너 실제 포트 확인 후 probe 수정: kubectl edit deployment <name>"
+        - "initialDelaySeconds를 30초 이상으로 늘려 초기화 시간 확보"
+      permanent:
+        - "readinessProbe, livenessProbe 포트를 containerPort와 일치시킴"
+        - "시작이 느린 애플리케이션은 startupProbe 별도 설정"
+    diagnosis_hints:
+      - "Running이지만 READY 0/1 → probe 실패 (컨테이너 자체는 동작 중)"
+      - "kubectl get endpoints로 Service에 IP가 없으면 Ready Pod이 없는 것"
+
+  - id: k8s-rbac-001
+    title: RBAC 권한 부족 — ServiceAccount cannot list/get resources
+    severity: high
+    category: security
+    keywords: [rbac, "cannot list", "cannot get", "forbidden", serviceaccount, role, rolebinding, 권한없음]
+    symptoms:
+      - 애플리케이션 로그에 "User 'system:serviceaccount:<ns>:<sa>' cannot list resource '<resource>'"
+      - kubectl auth can-i가 no 반환
+      - API 호출 시 403 Forbidden
+    diagnosis_commands:
+      - cmd: "kubectl get role,rolebinding -n <namespace>"
+        purpose: 네임스페이스 내 Role/RoleBinding 존재 여부
+      - cmd: "kubectl auth can-i list pods --as=system:serviceaccount:<ns>:<sa> -n <ns>"
+        purpose: 특정 ServiceAccount 권한 직접 확인
+      - cmd: "kubectl describe rolebinding <name> -n <namespace>"
+        purpose: RoleBinding이 올바른 SA에 바인딩됐는지 확인
+    root_causes:
+      - ServiceAccount 생성 후 Role/RoleBinding 미생성 (기본은 권한 없음)
+      - Role은 있지만 RoleBinding이 해당 ServiceAccount를 참조하지 않음
+      - ClusterRole이 필요한데 Role(네임스페이스 범위)만 생성
+    fix:
+      immediate:
+        - |
+          Role 및 RoleBinding 생성:
+          kubectl create role pod-reader --verb=get,list,watch --resource=pods -n <ns>
+          kubectl create rolebinding pod-reader-binding --role=pod-reader --serviceaccount=<ns>:<sa> -n <ns>
+      permanent:
+        - "최소 권한 원칙 — 필요한 verb와 resource만 명시"
+        - "ClusterRole + ClusterRoleBinding은 클러스터 전체 접근이 필요할 때만 사용"
+    diagnosis_hints:
+      - "ServiceAccount는 생성만으로는 권한이 없음 — Role+RoleBinding이 항상 필요"
+      - "오류 메시지의 SA 이름과 실제 Pod의 serviceAccountName이 일치하는지 확인"
+    prevention:
+      - "Helm chart에 RBAC 리소스 포함하여 애플리케이션과 함께 배포"
+
+  - id: k8s-hpa-001
+    title: HPA 스케일링 불가 — resource requests 미설정
+    severity: high
+    category: autoscaling
+    keywords: [hpa, autoscaler, "unknown", "missing request", "resource requests", 오토스케일링, 메트릭없음]
+    symptoms:
+      - kubectl get hpa에서 TARGETS가 "<unknown>/50%" 표시
+      - CPU 사용률이 높아도 Pod 수가 늘어나지 않음
+      - kubectl describe hpa에서 "missing request for cpu in container" 경고
+    diagnosis_commands:
+      - cmd: "kubectl get hpa -n <namespace>"
+        purpose: HPA 상태 및 TARGETS 값 확인
+      - cmd: "kubectl describe hpa <name> -n <namespace>"
+        purpose: 스케일링 실패 이유 상세
+      - cmd: "kubectl get deployment <name> -o jsonpath='{.spec.template.spec.containers[*].resources}'"
+        purpose: Deployment에 resources.requests 설정 여부
+    root_causes:
+      - Deployment에 resources.requests가 없으면 HPA가 CPU 사용률 계산 불가
+      - HPA는 "현재 CPU / requests.cpu" 비율로 스케일링 판단
+      - metrics-server 미설치로 메트릭 수집 자체가 안 되는 경우
+    fix:
+      immediate:
+        - |
+          Deployment에 resource requests 추가:
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+        - "kubectl rollout restart deployment/<name> 후 HPA 상태 재확인"
+      permanent:
+        - "모든 Deployment에 resources.requests 필수 설정 (OPA/Gatekeeper로 강제 가능)"
+        - "metrics-server 설치 확인: kubectl top nodes"
+    diagnosis_hints:
+      - "TARGETS가 <unknown>이면 메트릭 수집 실패 — requests 누락 또는 metrics-server 문제"
+      - "limits만 있고 requests가 없으면 HPA는 동작하지 않음"
+    prevention:
+      - "Admission Webhook으로 requests 없는 Deployment 배포 차단"

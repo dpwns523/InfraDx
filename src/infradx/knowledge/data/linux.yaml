@@ -342,3 +342,114 @@ issues:
     prevention:
       - "NFS 서버 ping 모니터링"
       - "D 상태 프로세스 수 > 5 시 알림"
+
+  - id: linux-disk-002
+    title: 로그 파일 폭증으로 인한 디스크 풀 — 열린 파일 핸들 주의
+    severity: high
+    category: disk
+    keywords: [disk, full, log, "app.log", "debug log", logrotate, truncate, 디스크풀, 로그]
+    symptoms:
+      - 배포 스크립트 또는 애플리케이션이 갑자기 파일 쓰기 실패
+      - df -h에서 특정 파티션 100% 또는 98% 이상
+      - 서비스 로그가 더 이상 생성되지 않음
+    diagnosis_commands:
+      - cmd: "df -h"
+        purpose: 파티션별 디스크 사용률
+      - cmd: "du -sh /var/* | sort -rh | head -10"
+        purpose: /var 하위 디렉토리 용량 상위
+      - cmd: "find /var/log -type f -size +500M -ls"
+        purpose: 500MB 이상 로그 파일 탐색
+      - cmd: "lsof +D /var/log/myapp/ | grep deleted"
+        purpose: 삭제됐지만 프로세스가 열고 있는 파일 (rm해도 공간 미반환)
+    root_causes:
+      - 프로덕션에 DEBUG 레벨 로그 활성화 (dev 설정 그대로 배포)
+      - logrotate 미설정 또는 rotation 주기 과다
+      - 프로세스가 파일 핸들을 열고 있어 rm 후에도 공간 미반환
+      - /var/log가 별도 파티션이라 root 여유공간과 무관하게 고갈
+    fix:
+      immediate:
+        - "프로세스가 파일을 열고 있는 경우 truncate 사용 (rm 금지): truncate -s 0 /var/log/app/app.log"
+        - "rm으로 삭제했으나 공간 미반환 시: lsof | grep deleted → 해당 프로세스 재시작"
+        - "오래된 압축 로그 삭제: find /var/log -name '*.log.gz' -mtime +7 -delete"
+      permanent:
+        - "logrotate 설정 추가 (/etc/logrotate.d/myapp): daily, rotate 7, compress, missingok, notifempty, copytruncate"
+        - "애플리케이션 로그 레벨 INFO 이상으로 변경"
+        - "로그 파티션을 LVM으로 확장 가능하게 구성"
+    diagnosis_hints:
+      - "lsof | grep deleted 결과가 있으면 rm이 아닌 truncate를 써야 공간이 즉시 반환됨"
+      - "df -h는 정상인데 쓰기 실패 → df -i로 inode 고갈 확인"
+    prevention:
+      - "파티션 사용률 > 80% 알림 (root와 /var/log 별도 모니터링)"
+      - "logrotate 설정 배포 파이프라인에 포함"
+
+  - id: linux-app-001
+    title: 애플리케이션 포트 충돌 — Address already in use
+    severity: high
+    category: process
+    keywords: ["address already in use", "EADDRINUSE", "bind failed", 포트충돌, "502", upstream, 포트점유]
+    symptoms:
+      - 서비스 시작 실패 — 로그에 "Address already in use" 또는 "bind(): Address already in use"
+      - Nginx 리버스 프록시 환경에서 502 Bad Gateway 발생
+      - 이전에 정상 동작하다가 재배포/재시작 후 갑자기 실패
+    diagnosis_commands:
+      - cmd: "ss -tlnp | grep :<port>"
+        purpose: 해당 포트를 점유 중인 프로세스 확인
+      - cmd: "lsof -i :<port>"
+        purpose: 포트 사용 프로세스 상세 (PID, 유저, 커맨드)
+      - cmd: "systemctl status <service>"
+        purpose: 서비스 상태 및 최근 로그
+      - cmd: "journalctl -u <service> --since '5 min ago'"
+        purpose: 서비스 실패 시점 로그
+    root_causes:
+      - 이전 인스턴스가 SIGTERM 없이 종료되거나 graceful shutdown 미구현으로 소켓 잔류
+      - 동일 포트를 사용하는 테스트 서버나 다른 프로세스가 남아있음
+      - 배포 스크립트가 이전 프로세스를 종료하지 않고 새 인스턴스 시작
+    fix:
+      immediate:
+        - "점유 프로세스 종료: kill <PID> (SIGTERM 우선, 안되면 kill -9)"
+        - "포트 해제 확인 후 서비스 재시작: ss -tlnp | grep :<port>"
+      permanent:
+        - "systemd에 Restart=on-failure 및 KillMode=mixed 설정"
+        - "ExecStartPre에 포트 점유 확인 스크립트 추가"
+        - "애플리케이션에 SO_REUSEADDR 소켓 옵션 적용"
+        - "graceful shutdown 구현 (SIGTERM 수신 시 기존 연결 완료 후 종료)"
+    prevention:
+      - "서비스 재시작 시 포트 상태 자동 확인"
+      - "배포 스크립트에 stop → verify → start 순서 강제"
+
+  - id: linux-io-002
+    title: 백업/배치 작업의 I/O 경합 — 프로덕션 서비스 응답 지연
+    severity: high
+    category: io
+    keywords: [ionice, rsync, backup, "io priority", 백업, I/O경합, 배치, iotop, 응답지연]
+    symptoms:
+      - 특정 시간대(백업 실행 중)에만 서비스 응답 지연 또는 타임아웃
+      - CPU/메모리는 정상이지만 iostat에서 %util 급등
+      - iotop에서 rsync 또는 백업 프로세스가 I/O 상위 점유
+    diagnosis_commands:
+      - cmd: "iotop -b -n 3 | head -20"
+        purpose: 프로세스별 I/O 사용량 (상위 확인)
+      - cmd: "ionice -p <pid>"
+        purpose: 특정 프로세스의 현재 I/O 우선순위 클래스 확인
+      - cmd: "iostat -xz 1 5"
+        purpose: 디스크 포화 확인
+      - cmd: "crontab -l && cat /etc/cron.d/*"
+        purpose: 백업/배치 작업 스케줄 확인
+    root_causes:
+      - rsync, mysqldump, tar 등 I/O 집중 작업이 기본 우선순위(be/4)로 실행
+      - 백업 시간대와 프로덕션 피크 시간 겹침
+      - I/O 스케줄러가 우선순위를 구분하지 않는 설정 (deadline/none)
+    fix:
+      immediate:
+        - "실행 중인 백업 프로세스 I/O 우선순위 낮추기: ionice -c 3 -p <rsync_pid>"
+        - "nice로 CPU 우선순위도 조정: renice +19 <pid>"
+      permanent:
+        - "백업 스크립트 시작 시 idle 클래스 적용: ionice -c 3 nice -n 10 /usr/local/bin/backup.sh"
+        - "백업 시간을 트래픽 최저 시간대로 변경 (새벽 2~4시)"
+        - "cgroup blkio로 백업 프로세스 I/O 대역폭 제한"
+    diagnosis_hints:
+      - "ionice 클래스: 1=realtime, 2=best-effort(기본), 3=idle (idle은 다른 I/O 없을 때만 실행)"
+      - "증상이 특정 시간(cron 실행 시간)에만 발생하면 백업/배치 경합 의심"
+    prevention:
+      - "백업 스크립트에 ionice -c 3 기본 적용"
+      - "백업 실행 시간대 I/O 사용률 별도 모니터링"

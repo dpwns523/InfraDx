@@ -138,13 +138,20 @@ class KnowledgeBase:
         query_tokens = re.split(r"[\s,]+", query.lower())
         scored: list[tuple[float, KnowledgeEntry]] = []
 
+        # OS types that are always searched when domain matches (not filtered by os_type)
+        _cross_os = {"kubernetes", "monitoring"}
+
         for entry in self._entries:
-            # Domain/OS filter
-            if domain and entry.domain != domain and not (
-                domain == "server" and entry.domain == "server"
-            ):
+            # Domain filter
+            if domain and entry.domain != domain:
                 continue
-            if os_type and entry.os and entry.os != os_type:
+            # OS filter — skip if os_type specified and entry has a different, non-cross os
+            if (
+                os_type
+                and entry.os
+                and entry.os != os_type
+                and entry.os not in _cross_os
+            ):
                 continue
 
             score = self._score(query_tokens, entry)
