@@ -6,13 +6,13 @@ from datetime import datetime
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, Button
+from textual.widgets import Header, Footer, Button
 from textual.containers import Horizontal
 from textual import on, work
 
 from infradx.state.session import Session
 from infradx.agent.core import AgentCore
-from infradx.tui.widgets.chat import ChatPanel
+from infradx.tui.widgets.chat import ChatPanel, _ChatInput
 from infradx.tui.widgets.sidebar import SidebarPanel
 
 
@@ -90,14 +90,13 @@ class InfraDxApp(App):
     async def _send_init_message(self) -> None:
         await self._stream_agent_response(_INIT_MESSAGE, inject=True)
 
-    @on(Input.Submitted, "#chat-input")
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    @on(_ChatInput.Submitted)
+    async def on_input_submitted(self, event: _ChatInput.Submitted) -> None:
         text = event.value.strip()
         if not text or self._is_streaming:
             return
 
         chat = self.query_one("#chat-panel", ChatPanel)
-        chat.clear_input()
         chat.append_user(text)
 
         self._handle_user_message(text)

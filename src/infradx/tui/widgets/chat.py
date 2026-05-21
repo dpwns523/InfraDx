@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+from textual import events
 from textual.app import ComposeResult
+from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import RichLog, Input, Button
+from textual.widgets import RichLog, Button, TextArea
 from textual.containers import Vertical, Horizontal
-from textual import on
+
+
+class _ChatInput(TextArea):
+    """Multi-line input: Enter submits, Shift+Enter inserts newline."""
+
+    class Submitted(Message):
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            text = self.text.strip()
+            if text:
+                self.post_message(self.Submitted(text))
+                self.clear()
+            event.prevent_default()
+        # shift+enter → TextArea default (inserts newline)
 
 
 class ChatPanel(Widget):
@@ -39,8 +58,14 @@ class ChatPanel(Widget):
         margin-left: 0;
     }
 
-    ChatPanel Input {
+    ChatPanel _ChatInput {
+        height: 5;
         margin: 0 1 1 1;
+        border: tall $primary;
+    }
+
+    ChatPanel _ChatInput:focus {
+        border: tall $accent;
     }
     """
 
@@ -55,7 +80,16 @@ class ChatPanel(Widget):
             yield Button("📊 메트릭 분석", id="btn-metrics", variant="default")
             yield Button("🔍 가설 업데이트", id="btn-hypothesize", variant="default")
             yield Button("📋 결론 도출", id="btn-conclude", variant="success")
-        yield Input(placeholder="메시지를 입력하세요 (Enter로 전송)...", id="chat-input")
+        yield _ChatInput(
+            id="chat-input",
+            language=None,
+            show_line_numbers=False,
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#chat-input", _ChatInput).placeholder = (
+            "메시지를 입력하세요 (Enter 전송 / Shift+Enter 줄바꿈)"
+        )
 
     def append_user(self, text: str) -> None:
         log = self.query_one("#chat-log", RichLog)
@@ -69,7 +103,6 @@ class ChatPanel(Widget):
         log = self.query_one("#chat-log", RichLog)
         self._stream_buffer += chunk
         lines = self._stream_buffer.split("\n")
-        # Flush all complete lines immediately
         for line in lines[:-1]:
             prefix = "[bold green]InfraDx:[/bold green] " if not self._streaming_started else ""
             self._streaming_started = True
@@ -78,19 +111,18 @@ class ChatPanel(Widget):
 
     def append_assistant_end(self) -> None:
         log = self.query_one("#chat-log", RichLog)
-        # Flush remaining buffer
         if self._stream_buffer:
             prefix = "[bold green]InfraDx:[/bold green] " if not self._streaming_started else ""
             log.write(prefix + self._stream_buffer)
             self._stream_buffer = ""
             self._streaming_started = False
-        log.write("")  # blank separator
+        log.write("")
 
     def clear_input(self) -> None:
-        self.query_one("#chat-input", Input).value = ""
+        self.query_one("#chat-input", _ChatInput).clear()
 
     def focus_input(self) -> None:
-        self.query_one("#chat-input", Input).focus()
+        self.query_one("#chat-input", _ChatInput).focus()
 
     def set_buttons_disabled(self, disabled: bool) -> None:
         for btn_id in ("btn-metrics", "btn-hypothesize", "btn-conclude"):
