@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import AsyncIterator, Protocol
 
@@ -127,6 +131,86 @@ class _OpenAIBackend:
                     yield delta
 
 
+# ── Claude Code CLI backend ──────────────────────────────────────────────────
+
+class _ClaudeCodeBackend:
+    """Uses the locally installed `claude` CLI (Claude Code Pro subscription).
+    No separate API key needed — streams via subprocess using stream-json format."""
+
+    def __init__(self) -> None:
+        if not shutil.which("claude"):
+            raise RuntimeError(
+                "`claude` CLI를 찾을 수 없습니다.\n"
+                "Claude Code가 설치되어 있는지 확인해 주세요."
+            )
+
+    async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
+        prompt = self._format_messages(messages)
+
+        # Write system prompt to a temp file to avoid arg length limits
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(system)
+            sys_file = f.name
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "-p", prompt,
+                "--system-prompt-file", sys_file,
+                "--output-format", "stream-json",
+                "--include-partial-messages",
+                "--verbose",
+                "--no-session-persistence",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+            async for raw in proc.stdout:  # type: ignore[union-attr]
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get("type") == "stream_event":
+                        evt = data.get("event", {})
+                        if (
+                            evt.get("type") == "content_block_delta"
+                            and evt.get("delta", {}).get("type") == "text_delta"
+                        ):
+                            text = evt["delta"]["text"]
+                            if text:
+                                yield text
+                    elif data.get("type") == "result" and data.get("is_error"):
+                        err = data.get("result", "알 수 없는 오류")
+                        yield f"\n[오류] {err}"
+                except json.JSONDecodeError:
+                    pass
+
+            await proc.wait()
+        finally:
+            Path(sys_file).unlink(missing_ok=True)
+
+    @staticmethod
+    def _format_messages(messages: list[dict]) -> str:
+        """Embed conversation history in the prompt text (claude -p is stateless)."""
+        if len(messages) == 1:
+            return messages[0]["content"]
+
+        lines: list[str] = ["[이전 대화 기록]"]
+        for msg in messages[:-1]:
+            role = "사용자" if msg["role"] == "user" else "InfraDx"
+            # Truncate very long assistant messages to save context
+            content = msg["content"]
+            if msg["role"] == "assistant" and len(content) > 800:
+                content = content[:800] + "...(요약됨)"
+            lines.append(f"{role}: {content}")
+
+        lines.append("\n[현재 질문]")
+        lines.append(messages[-1]["content"])
+        return "\n".join(lines)
+
+
 # ── Provider factory ─────────────────────────────────────────────────────────
 
 _PROVIDERS = {
@@ -134,6 +218,8 @@ _PROVIDERS = {
     "claude": _AnthropicBackend,
     "openai": _OpenAIBackend,
     "codex": _OpenAIBackend,
+    "claudecode": _ClaudeCodeBackend,
+    "local": _ClaudeCodeBackend,
 }
 
 _PROVIDER_INSTALL = {
@@ -141,6 +227,8 @@ _PROVIDER_INSTALL = {
     "claude": "anthropic",
     "openai": "openai",
     "codex": "openai",
+    "claudecode": None,
+    "local": None,
 }
 
 
@@ -155,11 +243,13 @@ def _make_backend() -> _AnthropicBackend | _OpenAIBackend:
     try:
         return cls()
     except ImportError:
-        pkg = _PROVIDER_INSTALL[provider]
-        raise RuntimeError(
-            f"'{pkg}' 패키지가 설치되지 않았습니다.\n"
-            f"실행: pip install {pkg}"
-        )
+        pkg = _PROVIDER_INSTALL.get(provider)
+        if pkg:
+            raise RuntimeError(
+                f"'{pkg}' 패키지가 설치되지 않았습니다.\n"
+                f"실행: pip install {pkg}"
+            )
+        raise
 
 
 # ── AgentCore ────────────────────────────────────────────────────────────────
