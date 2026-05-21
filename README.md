@@ -179,62 +179,143 @@ ionice -c 3 nice -n 10 /usr/local/bin/backup.sh
 
 ## 터미널에서 시작하는 방법
 
-### 1. 저장소 클론
+- [macOS / Linux](#macos--linux)
+- [Windows](#windows)
+
+---
+
+### macOS / Linux
+
+#### 1. 저장소 클론
 
 ```bash
-git clone https://github.com/<your-org>/infradx.git
-cd infradx
+git clone https://github.com/dpwns523/InfraDx.git
+cd InfraDx
 ```
 
-### 2. Python 환경 설정
+#### 2. Python 환경 설정
 
-Python 3.11 이상이 필요합니다. `uv`를 사용하면 자동으로 설치됩니다.
+Python 3.11 이상이 필요합니다.
 
 ```bash
 # uv 설치 (미설치 시)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.local/bin/env   # 또는 터미널 재시작
 
-# Python 3.11 설치 및 가상환경 생성
 uv python install 3.11
 uv venv --python 3.11
 source .venv/bin/activate
 ```
 
-### 3. 패키지 설치
+#### 3. 패키지 설치
 
 ```bash
-# 기본 설치 (Anthropic Claude 사용)
 uv pip install -e .
 
-# OpenAI GPT-4 함께 사용 시
+# OpenAI GPT-4o 함께 사용 시
 uv pip install -e ".[openai]"
 ```
 
-### 4. API 키 설정
+#### 4. 프로바이더 설정 및 실행
 
 ```bash
 cp .env.example .env
+# .env 편집 후
+python -m infradx
 ```
 
-`.env` 파일을 열고 사용할 프로바이더의 API 키를 입력합니다.
+---
+
+### Windows
+
+> **권장 환경:** Windows 10/11 + PowerShell 7 또는 Windows Terminal
+> Claude Code CLI가 설치된 경우 API 키 없이 바로 사용할 수 있습니다.
+
+#### 1. 저장소 클론
+
+```powershell
+git clone https://github.com/dpwns523/InfraDx.git
+cd InfraDx
+```
+
+#### 2. Python 환경 설정
+
+```powershell
+# uv 설치 (미설치 시) — PowerShell에서 실행
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# 터미널 재시작 후
+
+uv python install 3.11
+uv venv --python 3.11
+.venv\Scripts\activate
+```
+
+#### 3. 패키지 설치
+
+```powershell
+uv pip install -e .
+
+# OpenAI GPT-4o 함께 사용 시
+uv pip install -e ".[openai]"
+```
+
+#### 4. 프로바이더 설정
+
+```powershell
+copy .env.example .env
+notepad .env   # 또는 원하는 편집기로 열기
+```
+
+`.env` 파일 내용 예시:
 
 ```env
-# OpenAI GPT-4o / Codex 사용 시 (기본값)
-INFRADX_PROVIDER=openai
-OPENAI_API_KEY=sk-your-openai-key-here
-INFRADX_MODEL=gpt-4o
+# Claude Code CLI 사용 (API 키 불필요, Pro 구독 활용) — 권장
+INFRADX_PROVIDER=claudecode
 
-# Anthropic Claude 사용 시
+# OpenAI GPT-4o 사용 시
+# INFRADX_PROVIDER=openai
+# OPENAI_API_KEY=sk-your-openai-key-here
+# INFRADX_MODEL=gpt-4o
+
+# Anthropic Claude API 사용 시
 # INFRADX_PROVIDER=anthropic
 # ANTHROPIC_API_KEY=sk-ant-your-key-here
 # INFRADX_MODEL=claude-sonnet-4-6
 ```
 
-> **OpenAI API 키 발급:** [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
->
-> **Anthropic API 키 발급:** [console.anthropic.com](https://console.anthropic.com)
-> (Claude Code Pro 구독과 별개입니다)
+#### 5. 한글 출력 설정 (Windows 전용)
+
+터미널에서 한글이 깨지는 경우 실행 전 아래 명령어를 입력합니다.
+
+```powershell
+chcp 65001
+$env:PYTHONUTF8 = "1"
+```
+
+매번 설정하지 않으려면 PowerShell 프로파일에 추가합니다.
+
+```powershell
+Add-Content $PROFILE "`n`$env:PYTHONUTF8 = '1'"
+Add-Content $PROFILE "`nchcp 65001 | Out-Null"
+```
+
+#### 6. 실행
+
+```powershell
+python -m infradx
+```
+
+> **pyperclip 오류 시** (Ctrl+C 복사 기능): `pip install pyperclip` 후 재실행
+
+---
+
+### 프로바이더별 API 키
+
+| 프로바이더 | 키 발급 위치 | 비고 |
+|-----------|------------|------|
+| `claudecode` | 불필요 | Claude Code Pro 구독 + `claude` CLI 설치 필요 |
+| `openai` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | 유료 |
+| `anthropic` | [console.anthropic.com](https://console.anthropic.com) | Pro 구독과 별개, 유료 |
 
 ### 5. 실행
 

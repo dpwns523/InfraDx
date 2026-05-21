@@ -57,7 +57,7 @@ _MAX_HISTORY = 12  # 6 user+assistant turn pairs
 
 
 def _load_agent_md() -> str:
-    return _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
+    return _AGENT_MD.read_text(encoding="utf-8") if _AGENT_MD.exists() else ""
 
 
 def _load_skills(names: list[str]) -> str:
@@ -66,7 +66,7 @@ def _load_skills(names: list[str]) -> str:
         path = _SKILLS_DIR / f"{name}.md"
         if path.exists():
             parts.append(f"\n\n---\n# Skill: {name}\n")
-            parts.append(path.read_text())
+            parts.append(path.read_text(encoding="utf-8"))
     return "".join(parts)
 
 
@@ -261,7 +261,7 @@ class AgentCore:
         # Pre-load all skill files into a cache
         self._skill_cache: dict[str, str] = {}
         for path in _SKILLS_DIR.glob("*.md"):
-            self._skill_cache[path.stem] = path.read_text()
+            self._skill_cache[path.stem] = path.read_text(encoding="utf-8")
         self._kb = get_knowledge_base()
 
     def _build_system_prompt(self, phase: Phase) -> str:
