@@ -1,0 +1,267 @@
+# Public Cloud Known Issues — InfraDx Knowledge Base
+# schema version: 1
+domain: server
+os: cloud
+
+issues:
+
+  # ── AWS ──────────────────────────────────────────────────────────────────
+
+  - id: cloud-aws-001
+    title: EC2 인스턴스 SSH 접근 불가 — 보안그룹/NACL 차단
+    severity: critical
+    category: aws
+    keywords: [ec2, ssh, "security group", nacl, "connection timeout", 보안그룹, 접근불가, aws]
+    symptoms:
+      - ssh 연결 시 "Connection timed out" (즉시 거부가 아닌 타임아웃)
+      - AWS 콘솔에서 인스턴스는 running 상태
+      - 퍼블릭 IP 또는 Elastic IP는 할당됨
+    diagnosis_commands:
+      - cmd: "aws ec2 describe-security-groups --group-ids <sg-id> --query 'SecurityGroups[*].IpPermissions'"
+        purpose: 보안그룹 인바운드 규칙 확인 (22번 포트 허용 여부)
+      - cmd: "aws ec2 describe-network-acls --filters Name=association.subnet-id,Values=<subnet-id>"
+        purpose: NACL 규칙 확인 (deny 규칙 우선순위)
+      - cmd: "aws ec2 describe-instances --instance-ids <id> --query 'Reservations[*].Instances[*].{State:State,PublicIP:PublicIpAddress,SubnetId:SubnetId}'"
+        purpose: 인스턴스 상태, IP, 서브넷 확인
+      - cmd: "aws ec2 get-console-output --instance-id <id>"
+        purpose: 인스턴스 콘솔 출력 (OS 부팅 오류 확인)
+    root_causes:
+      - 보안그룹 인바운드에 22/TCP 규칙 없음 또는 소스 IP 불일치
+      - NACL에서 SSH 포트 또는 응답 포트(1024-65535) 차단
+      - 인스턴스가 프라이빗 서브넷에 있고 NAT/Bastion 미경유
+      - OS 내부 방화벽 (iptables/firewalld)이 SSH 차단
+    fix:
+      immediate:
+        - "보안그룹에 SSH 규칙 추가: aws ec2 authorize-security-group-ingress --group-id <sg> --protocol tcp --port 22 --cidr <my-ip>/32"
+        - "AWS 콘솔 EC2 Instance Connect 또는 Session Manager로 우회 접속"
+      permanent:
+        - "Bastion Host 또는 SSM Session Manager로 SSH 대체 (키 관리 불필요)"
+        - "VPN 또는 Direct Connect 환경에서 소스 IP를 내부 대역으로 제한"
+    diagnosis_hints:
+      - "Connection timed out → 방화벽/보안그룹 차단 / Connection refused → OS 내부 SSH 데몬 문제"
+      - "NACL은 stateless이므로 인바운드 허용 시 아웃바운드 임시 포트(1024-65535)도 허용 필요"
+
+  - id: cloud-aws-002
+    title: ALB/NLB 타겟 Health Check 실패 — 503 Service Unavailable
+    severity: critical
+    category: aws
+    keywords: [alb, nlb, "health check", "503", "target group", 헬스체크실패, unhealthy, 로드밸런서]
+    symptoms:
+      - ALB 경유 요청에서 503 또는 504 응답
+      - AWS 콘솔 Target Group에서 타겟이 unhealthy
+      - 직접 EC2 IP로 요청 시 정상 응답
+    diagnosis_commands:
+      - cmd: "aws elbv2 describe-target-health --target-group-arn <arn>"
+        purpose: 타겟별 헬스체크 상태 및 실패 이유
+      - cmd: "aws elbv2 describe-target-groups --target-group-arns <arn> --query 'TargetGroups[*].{Port:Port,Protocol:Protocol,HealthCheckPath:HealthCheckPath}'"
+        purpose: 헬스체크 포트/경로/프로토콜 설정 확인
+      - cmd: "aws ec2 describe-security-groups --group-ids <sg-id> | grep -A 5 'IpPermissions'"
+        purpose: EC2 보안그룹에서 ALB로부터의 헬스체크 포트 허용 여부
+    root_causes:
+      - 헬스체크 경로(Path)가 실제 존재하지 않는 엔드포인트 지정 (404 반환)
+      - 헬스체크 포트가 애플리케이션 실제 포트와 다름
+      - EC2 보안그룹에서 ALB 보안그룹으로부터의 인바운드 미허용
+      - 애플리케이션 기동 지연으로 헬스체크 타임아웃 초과
+    fix:
+      immediate:
+        - "헬스체크 경로를 200 응답하는 엔드포인트로 수정 (예: /health, /ping)"
+        - "EC2 보안그룹 인바운드에 ALB 보안그룹 소스로 앱 포트 허용 추가"
+      permanent:
+        - "HealthCheck 임계값(Threshold) 및 타임아웃 조정 (기동이 느린 앱)"
+        - "Slow Start 설정으로 신규 타겟에 점진적 트래픽 전달"
+    diagnosis_hints:
+      - "HealthCheckPath의 응답 코드가 HealthyHttpCodes에 포함되어야 healthy로 판정"
+      - "NLB는 보안그룹 없음 — 타겟 EC2의 보안그룹에서 소스를 VPC CIDR로 허용 필요"
+
+  - id: cloud-aws-003
+    title: IAM 권한 오류 — AccessDenied
+    severity: high
+    category: aws
+    keywords: [iam, "access denied", "is not authorized", permission, role, policy, 권한없음, aws]
+    symptoms:
+      - 'AWS API 호출 시 "User/Role is not authorized to perform: <action>"'
+      - '"AccessDenied" 오류'
+      - 특정 서비스 또는 리소스에만 접근 실패
+    diagnosis_commands:
+      - cmd: "aws iam simulate-principal-policy --policy-source-arn <role-arn> --action-names <action> --resource-arns <resource-arn>"
+        purpose: 특정 액션 허용 여부 시뮬레이션
+      - cmd: "aws iam list-attached-role-policies --role-name <role>"
+        purpose: 역할에 연결된 정책 목록
+      - cmd: "aws iam get-policy-version --policy-arn <arn> --version-id v1"
+        purpose: 정책 상세 내용 확인
+      - cmd: "aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=<action> --max-results 10"
+        purpose: CloudTrail에서 최근 해당 액션 이벤트 확인
+    root_causes:
+      - IAM 정책에 해당 액션(Action)이 명시적으로 허용되지 않음
+      - SCP(Service Control Policy)가 상위에서 차단
+      - 리소스 기반 정책(S3 버킷 정책 등)에서 해당 주체 거부
+      - 조건(Condition) 불일치 (예: MFA 필요, 특정 IP 대역)
+    fix:
+      immediate:
+        - "IAM 정책에 필요한 Action 추가 (최소 권한 원칙 유지)"
+        - "인라인 정책으로 임시 허용 후 관리형 정책으로 이관"
+      permanent:
+        - "IAM Access Analyzer로 미사용 권한 주기적 정리"
+        - "Permission Boundary 설정으로 최대 권한 범위 제한"
+    diagnosis_hints:
+      - "오류 메시지의 'arn:aws:iam' 부분에서 거부된 주체(Principal) 확인"
+      - "explicit deny가 있으면 allow 추가로 해결 안됨 — deny 제거 또는 SCP 확인 필요"
+
+  - id: cloud-aws-004
+    title: RDS 연결 실패 — 보안그룹 또는 파라미터 그룹 문제
+    severity: high
+    category: aws
+    keywords: [rds, "connection refused", "can't connect", mysql, postgres, 데이터베이스, 연결실패, aws]
+    symptoms:
+      - 애플리케이션에서 DB 연결 타임아웃 또는 Connection refused
+      - RDS 콘솔에서 인스턴스 상태는 available
+      - 같은 VPC 내 EC2에서도 연결 실패
+    diagnosis_commands:
+      - cmd: "aws rds describe-db-instances --db-instance-identifier <id> --query 'DBInstances[*].{Status:DBInstanceStatus,Endpoint:Endpoint,VPC:DBSubnetGroup.VpcId}'"
+        purpose: RDS 상태, 엔드포인트, VPC 확인
+      - cmd: "aws ec2 describe-security-groups --group-ids <rds-sg-id>"
+        purpose: RDS 보안그룹 인바운드 규칙 (DB 포트 허용 여부)
+      - cmd: "nc -zv <rds-endpoint> 3306"
+        purpose: EC2에서 직접 포트 연결 테스트
+    root_causes:
+      - RDS 보안그룹이 EC2 보안그룹 또는 애플리케이션 IP를 허용하지 않음
+      - 잘못된 엔드포인트 사용 (읽기 전용 복제본 엔드포인트로 쓰기 시도)
+      - 파라미터 그룹 변경 후 재부팅 미완료
+      - Multi-AZ Failover 중 일시적 연결 단절
+    fix:
+      immediate:
+        - "RDS 보안그룹에 EC2 보안그룹 소스로 DB 포트(3306/5432) 허용 추가"
+        - "엔드포인트가 올바른지 확인 (writer endpoint vs reader endpoint)"
+      permanent:
+        - "RDS Proxy 사용으로 연결 풀링 및 Failover 자동 처리"
+        - "애플리케이션에 retry 로직 및 connection timeout 설정"
+    diagnosis_hints:
+      - "RDS는 퍼블릭 서브넷에 없거나 Publicly Accessible=No이면 외부 접속 불가"
+      - "Multi-AZ Failover 시 약 60-120초 다운타임 발생 — 애플리케이션 재시도 필요"
+
+  # ── GCP ──────────────────────────────────────────────────────────────────
+
+  - id: cloud-gcp-001
+    title: GCE 인스턴스 외부 접근 불가 — 방화벽 규칙 누락
+    severity: high
+    category: gcp
+    keywords: [gce, firewall, "connection timeout", vpc, "gcloud compute", 방화벽, gcp]
+    symptoms:
+      - 외부에서 GCE 인스턴스 접근 시 타임아웃
+      - 인스턴스 내부에서는 서비스 정상 동작
+      - gcloud compute ssh는 IAP 통해 성공
+    diagnosis_commands:
+      - cmd: "gcloud compute firewall-rules list --filter='network=<vpc-name>' --format='table(name,direction,priority,sourceRanges,targetTags,allowed)'"
+        purpose: VPC 방화벽 규칙 전체 목록
+      - cmd: "gcloud compute instances describe <name> --zone <zone> --format='value(networkInterfaces[0].networkIP, networkInterfaces[0].accessConfigs[0].natIP, tags.items)'"
+        purpose: 인스턴스 IP 및 네트워크 태그 확인
+      - cmd: "gcloud compute firewall-rules describe <rule-name>"
+        purpose: 특정 방화벽 규칙 상세
+    root_causes:
+      - 인스턴스 네트워크 태그와 방화벽 규칙 타겟 태그 불일치
+      - 방화벽 규칙이 없고 기본 deny-all 적용
+      - 소스 IP 범위가 너무 좁게 설정
+    fix:
+      immediate:
+        - "방화벽 규칙 생성: gcloud compute firewall-rules create allow-<service> --allow tcp:<port> --source-ranges 0.0.0.0/0 --target-tags <tag>"
+        - "인스턴스에 태그 추가: gcloud compute instances add-tags <name> --tags <tag> --zone <zone>"
+      permanent:
+        - "Cloud Armor으로 IP 화이트리스트/블랙리스트 관리"
+        - "IAP(Identity-Aware Proxy)로 SSH 접근 — 외부 포트 오픈 불필요"
+    diagnosis_hints:
+      - "GCP 방화벽은 태그 기반 — 인스턴스 태그와 방화벽 targetTags가 일치해야 적용"
+      - "deny 규칙 없이도 allow 규칙이 없으면 기본 차단"
+
+  - id: cloud-gcp-002
+    title: GKE 노드 NotReady — 노드 풀 자원 부족
+    severity: critical
+    category: gcp
+    keywords: [gke, "notready", "node pool", "resource exhausted", 노드, 자원부족, 오토스케일링, gcp]
+    symptoms:
+      - kubectl get nodes에서 STATUS가 NotReady
+      - 신규 Pod이 Pending 상태 (FailedScheduling)
+      - GKE 콘솔에서 노드 풀 자원 사용률 100%
+    diagnosis_commands:
+      - cmd: "kubectl describe node <node-name> | grep -A 10 'Conditions:'"
+        purpose: 노드 상태 조건 (DiskPressure, MemoryPressure, PIDPressure)
+      - cmd: "kubectl get events -n kube-system | grep -i 'node\\|scale'"
+        purpose: 노드 관련 이벤트 (오토스케일러 동작 확인)
+      - cmd: "gcloud container node-pools describe <pool> --cluster <cluster> --zone <zone>"
+        purpose: 노드 풀 설정 (min/max 노드 수, 머신 타입)
+    root_causes:
+      - 오토스케일러 최대 노드 수 도달
+      - 특정 AZ 자원 부족 (GCP zone quota 초과)
+      - 노드 디스크 또는 메모리 압박 (DiskPressure)
+    fix:
+      immediate:
+        - "노드 풀 수동 확장: gcloud container clusters resize <cluster> --node-pool <pool> --num-nodes <n>"
+        - "오토스케일러 최대 노드 수 증가: gcloud container node-pools update <pool> --max-nodes <n>"
+      permanent:
+        - "Cluster Autoscaler 설정 및 GCP 쿼터 증가 요청"
+        - "PodDisruptionBudget으로 노드 드레인 중 가용성 보장"
+    diagnosis_hints:
+      - "kubectl describe node에서 Conditions에 Unknown이 있으면 kubelet 통신 단절"
+      - "FailedScheduling 이벤트에 'Insufficient cpu/memory' vs 'no nodes available' 구분 중요"
+
+  # ── Azure ─────────────────────────────────────────────────────────────────
+
+  - id: cloud-azure-001
+    title: Azure VM 시작 실패 — 할당 오류 (Allocation Failed)
+    severity: high
+    category: azure
+    keywords: [azure, vm, "allocation failed", "allocationfailed", 할당오류, 시작실패, quota]
+    symptoms:
+      - VM 시작 또는 생성 시 "AllocationFailed" 오류
+      - Azure 포털에서 VM이 "Failed" 상태
+      - 특정 리전/사이즈에서만 발생
+    diagnosis_commands:
+      - cmd: "az vm show -g <rg> -n <vm> --query '{Status:instanceView.statuses[-1].displayStatus, Size:hardwareProfile.vmSize}'"
+        purpose: VM 상태 및 사이즈 확인
+      - cmd: "az vm list-skus --location <region> --size <vm-size> --query '[*].restrictions'"
+        purpose: 해당 VM 사이즈의 리전 내 제약 확인
+      - cmd: "az quota show --resource-name virtualMachines --scope /subscriptions/<sub>/providers/Microsoft.Compute/locations/<region>"
+        purpose: 구독 할당량 확인
+    root_causes:
+      - 해당 리전/AZ에 요청한 VM 사이즈 재고 부족
+      - 구독 vCPU 할당량 초과
+      - 특정 VM 시리즈가 해당 리전에서 제한됨
+    fix:
+      immediate:
+        - "다른 AZ 또는 리전에서 VM 생성 시도"
+        - "같은 성능의 다른 VM 사이즈 사용"
+      permanent:
+        - "Azure 지원에 할당량 증가 요청"
+        - "Azure Spot VM 활용 (비용 절감 + 유연한 할당)"
+    diagnosis_hints:
+      - "AllocationFailed는 Azure 인프라 문제 — 리소스 재시도 또는 다른 사이즈/리전으로 우회"
+
+  - id: cloud-azure-002
+    title: AKS Pod 이미지 Pull 실패 — ACR 인증 오류
+    severity: high
+    category: azure
+    keywords: [aks, acr, "image pull", "unauthorized", "401", 인증오류, 컨테이너레지스트리, azure]
+    symptoms:
+      - Pod이 ImagePullBackOff 상태
+      - kubectl describe에서 "unauthorized: authentication required" 오류
+      - ACR(Azure Container Registry)에서 이미지 pull 실패
+    diagnosis_commands:
+      - cmd: "kubectl describe pod <name> | grep -A 5 'Events'"
+        purpose: 이미지 pull 오류 메시지 확인
+      - cmd: "az aks check-acr --name <cluster> --resource-group <rg> --acr <acr-name>"
+        purpose: AKS-ACR 통합 연결 상태 확인
+      - cmd: "az aks show --name <cluster> --resource-group <rg> --query 'identityProfile'"
+        purpose: AKS Managed Identity 확인
+    root_causes:
+      - AKS 클러스터에 ACR Pull 권한 미부여 (AcrPull role 없음)
+      - imagePullSecret이 없거나 만료됨
+      - ACR 방화벽이 AKS 노드 IP를 차단
+    fix:
+      immediate:
+        - "AKS에 ACR 접근 권한 부여: az aks update --name <cluster> --resource-group <rg> --attach-acr <acr>"
+        - "수동 imagePullSecret 생성 후 ServiceAccount에 연결"
+      permanent:
+        - "Managed Identity 기반 ACR 통합 사용 (키 관리 불필요)"
+        - "ACR 방화벽에 AKS 노드 서브넷 허용"
+    diagnosis_hints:
+      - "401 Unauthorized → 인증 문제 / 404 Not Found → 이미지 태그 문제"
+      - "az aks check-acr 명령으로 권한 설정 한 번에 검증 가능"

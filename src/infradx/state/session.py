@@ -16,7 +16,7 @@ class Phase(str, Enum):
     RECOMMEND = "RECOMMEND"
 
 
-Domain = Literal["server", "network", "disk"] | None
+Domain = Literal["server", "network", "disk", "kubernetes", "cloud"] | None
 
 
 @dataclass
@@ -28,14 +28,25 @@ class Hypothesis:
 
 @dataclass
 class SystemSpec:
+    # server
     os_type: str | None = None
     kernel_version: str | None = None
     deployment_type: str | None = None
     hypervisor: str | None = None
     arch: str | None = None
+    # network / disk
     vendor_info: str | None = None
     disk_interface: str | None = None
     disk_type: str | None = None
+    # kubernetes
+    k8s_distribution: str | None = None   # eks | gke | aks | self-managed | other
+    k8s_version: str | None = None
+    k8s_problem_scope: str | None = None  # pod | network | storage | scheduling | security | node
+    k8s_namespace: str | None = None
+    # cloud
+    cloud_provider: str | None = None     # aws | gcp | azure | ncp | other
+    cloud_service: str | None = None      # EC2 | RDS | ALB | GKE | ...
+    cloud_region: str | None = None
 
 
 @dataclass

@@ -139,7 +139,7 @@ class KnowledgeBase:
         scored: list[tuple[float, KnowledgeEntry]] = []
 
         # OS types that are always searched when domain matches (not filtered by os_type)
-        _cross_os = {"kubernetes", "monitoring"}
+        _cross_os = {"kubernetes", "monitoring", "cloud"}
 
         for entry in self._entries:
             # Domain filter

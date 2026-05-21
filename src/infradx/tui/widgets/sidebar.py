@@ -90,13 +90,27 @@ class SidebarPanel(Widget):
         spec = session.spec
         spec_lines: list[str] = []
         if session.domain:
-            spec_lines.append(f"도메인: {session.domain}")
+            domain_label = {
+                "server": "서버", "network": "네트워크", "disk": "디스크",
+                "kubernetes": "Kubernetes", "cloud": "퍼블릭 클라우드",
+            }.get(session.domain, session.domain)
+            spec_lines.append(f"도메인: {domain_label}")
         if spec.os_type:
             spec_lines.append(f"OS: {spec.os_type}")
         if spec.kernel_version:
             spec_lines.append(f"커널: {spec.kernel_version}")
         if spec.deployment_type:
             spec_lines.append(f"유형: {spec.deployment_type}")
+        if spec.k8s_distribution:
+            spec_lines.append(f"K8s: {spec.k8s_distribution} {spec.k8s_version or ''}")
+        if spec.k8s_problem_scope:
+            spec_lines.append(f"범위: {spec.k8s_problem_scope}")
+        if spec.cloud_provider:
+            spec_lines.append(f"Cloud: {spec.cloud_provider.upper()}")
+        if spec.cloud_service:
+            spec_lines.append(f"서비스: {spec.cloud_service}")
+        if spec.cloud_region:
+            spec_lines.append(f"리전: {spec.cloud_region}")
 
         spec_display = self.query_one("#spec-summary", Static)
         spec_display.update("\n".join(spec_lines) if spec_lines else "수집 중...")

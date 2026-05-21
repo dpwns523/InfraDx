@@ -179,11 +179,27 @@ class AgentCore:
         if not query_parts:
             return ""
 
+        # Enrich query with cloud/k8s spec context
+        if session.spec.cloud_provider:
+            query_parts.append(session.spec.cloud_provider)
+        if session.spec.cloud_service:
+            query_parts.append(session.spec.cloud_service)
+        if session.spec.k8s_distribution:
+            query_parts.append(session.spec.k8s_distribution)
+        if session.spec.k8s_problem_scope:
+            query_parts.append(session.spec.k8s_problem_scope)
+
         query = " ".join(query_parts)
+
+        # For kubernetes/cloud domains, search with os_type override
+        search_os = session.spec.os_type
+        if session.domain in ("kubernetes", "cloud"):
+            search_os = None  # don't filter by OS for these domains
+
         entries = self._kb.search(
             query=query,
-            domain=session.domain,
-            os_type=session.spec.os_type,
+            domain="server",  # kubernetes/cloud entries are filed under server domain
+            os_type=search_os,
             top_n=2,
         )
 
