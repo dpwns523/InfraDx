@@ -256,15 +256,138 @@ class _ClaudeCodeBackend:
         return "\n".join(lines)
 
 
+# ── Codex CLI backend ────────────────────────────────────────────────────────
+
+class _CodexCLIBackend:
+    """Uses the locally installed `codex` CLI (OpenAI Codex, no API key needed).
+    Streams via `codex exec - --json` with prompt written to stdin."""
+
+    context_limit = 128_000
+
+    # item.type values that are NOT plain text responses
+    _TOOL_ITEM_TYPES = frozenset({
+        "tool_call", "tool_result", "command_execution", "file_change",
+        "web_search", "mcp_tool_call", "plan_update",
+    })
+
+    def __init__(self) -> None:
+        if not shutil.which("codex"):
+            raise RuntimeError(
+                "`codex` CLI를 찾을 수 없습니다.\n"
+                "npm install -g @openai/codex 로 설치 후 로그인해 주세요:\n"
+                "  codex login"
+            )
+        self.last_usage: tuple[int, int] | None = None
+
+    async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
+        prompt = self._format_prompt(system, messages)
+
+        # Strip API keys — codex uses its own OAuth credentials
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+
+        args = [
+            "codex", "exec", "-",       # Read prompt from stdin
+            "--json",                    # JSONL output to stdout
+            "--sandbox", "read-only",    # Block file writes
+            "--ignore-rules",            # Skip project .codex rules
+            "--ephemeral",               # No session persistence
+        ]
+        if os.name == "nt":
+            args = ["cmd", "/c"] + args
+
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+
+        try:
+            if proc.stdin:
+                proc.stdin.write(prompt.encode("utf-8"))
+                await proc.stdin.drain()
+                proc.stdin.close()
+
+            async for raw in proc.stdout:  # type: ignore[union-attr]
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    event_type = data.get("type", "")
+
+                    if event_type == "item.completed":
+                        item = data.get("item", {})
+                        if item.get("type") not in self._TOOL_ITEM_TYPES:
+                            text = item.get("text") or item.get("content") or ""
+                            if isinstance(text, list):
+                                # content may be [{type:text, text:...}] format
+                                text = "".join(
+                                    p.get("text", "") for p in text
+                                    if isinstance(p, dict) and p.get("type") == "text"
+                                )
+                            if text:
+                                yield str(text)
+
+                    elif event_type == "turn.completed":
+                        usage = data.get("usage", {})
+                        if usage:
+                            self.last_usage = (
+                                usage.get("input_tokens", 0),
+                                usage.get("output_tokens", 0),
+                            )
+
+                    elif event_type == "turn.failed":
+                        err = data.get("error", {})
+                        msg = err.get("message", "알 수 없는 오류") if isinstance(err, dict) else str(err)
+                        yield f"\n[오류] {msg}"
+
+                except json.JSONDecodeError:
+                    pass
+
+            await proc.wait()
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+
+    @staticmethod
+    def _format_prompt(system: str, messages: list[dict]) -> str:
+        """Embed system prompt + history in stdin prompt (codex exec is stateless)."""
+        lines = [
+            "[시스템 지침]",
+            system,
+            "",
+            "※ 중요: 파일 수정이나 명령어 실행 없이 텍스트 답변만 작성하세요.",
+            "",
+        ]
+
+        if len(messages) > 1:
+            lines.append("[이전 대화 기록]")
+            for msg in messages[:-1]:
+                role = "사용자" if msg["role"] == "user" else "InfraDx"
+                content = msg["content"]
+                if msg["role"] == "assistant" and len(content) > 800:
+                    content = content[:800] + "...(요약됨)"
+                lines.append(f"{role}: {content}")
+            lines.append("")
+
+        lines.append("[현재 질문]")
+        lines.append(messages[-1]["content"])
+        return "\n".join(lines)
+
+
 # ── Provider factory ─────────────────────────────────────────────────────────
 
 _PROVIDERS = {
     "anthropic": _AnthropicBackend,
     "claude": _AnthropicBackend,
     "openai": _OpenAIBackend,
-    "codex": _OpenAIBackend,
+    "codex": _OpenAIBackend,       # OpenAI API (API key required)
     "claudecode": _ClaudeCodeBackend,
     "local": _ClaudeCodeBackend,
+    "codexcli": _CodexCLIBackend,  # Codex CLI (no API key)
 }
 
 _PROVIDER_INSTALL = {
@@ -274,6 +397,7 @@ _PROVIDER_INSTALL = {
     "codex": "openai",
     "claudecode": None,
     "local": None,
+    "codexcli": None,
 }
 
 

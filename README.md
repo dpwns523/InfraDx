@@ -326,23 +326,29 @@ InfraDx는 세 가지 백엔드를 지원합니다. `INFRADX_PROVIDER` 환경변
 
 | `INFRADX_PROVIDER` | API 키 | 설명 |
 |--------------------|--------|------|
-| `claudecode` (또는 `local`) | **불필요** | 로컬에 설치된 `claude` CLI를 서브프로세스로 호출. Claude Code Pro 구독으로 인증. |
-| `openai` (또는 `codex`) | **필수** (`OPENAI_API_KEY`) | OpenAI API를 직접 호출. GPT-4o 기본. `codex`는 같은 백엔드의 별칭. |
-| `anthropic` (또는 `claude`) | **필수** (`ANTHROPIC_API_KEY`) | Anthropic API를 직접 호출. claude-sonnet-4-6 기본. |
+| `claudecode` (또는 `local`) | **불필요** | 로컬 `claude` CLI를 서브프로세스로 호출. Claude Code Pro 구독으로 인증. |
+| `codexcli` | **불필요** | 로컬 `codex` CLI를 서브프로세스로 호출. OpenAI 계정으로 인증. |
+| `openai` (또는 `codex`) | **필수** (`OPENAI_API_KEY`) | OpenAI API 직접 호출. GPT-4o 기본. `codex`는 이 백엔드의 별칭 (CLI 아님). |
+| `anthropic` (또는 `claude`) | **필수** (`ANTHROPIC_API_KEY`) | Anthropic API 직접 호출. claude-sonnet-4-6 기본. |
 
-> **주의:** `INFRADX_PROVIDER=codex`는 OpenAI **API** 백엔드의 별칭입니다.
-> OpenAI의 Codex CLI 도구(`codex` 명령어)와 다르며, `OPENAI_API_KEY`가 필요합니다.
-> API 키 없이 사용하려면 `claudecode` 프로바이더를 사용하세요.
+> **`codex` vs `codexcli`**: `INFRADX_PROVIDER=codex`는 OpenAI **API** 백엔드로 API 키가 필요합니다.
+> API 키 없이 OpenAI Codex CLI를 사용하려면 `codexcli`를 사용하세요.
 
 ### 프로바이더별 사전 조건
 
-**claudecode** (권장, API 키 불필요)
+**claudecode** (API 키 불필요)
 ```bash
-# Claude Code 설치 확인
+# Claude Code 설치: https://claude.ai/download
 claude --version
-
-# 로그인 상태 확인
 claude auth status
+```
+
+**codexcli** (API 키 불필요)
+```bash
+# Codex CLI 설치 (Node.js 필요)
+npm install -g @openai/codex
+codex login
+codex --version
 ```
 
 **openai**
