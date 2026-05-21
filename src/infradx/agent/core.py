@@ -155,6 +155,11 @@ class _ClaudeCodeBackend:
             sys_file = f.name
 
         try:
+            # Strip Anthropic/OpenAI API keys from subprocess env so the claude CLI
+            # uses its own OAuth credentials (Pro subscription) instead of the key.
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+
             proc = await asyncio.create_subprocess_exec(
                 "claude", "-p", prompt,
                 "--system-prompt-file", sys_file,
@@ -164,6 +169,7 @@ class _ClaudeCodeBackend:
                 "--no-session-persistence",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=env,
             )
 
             async for raw in proc.stdout:  # type: ignore[union-attr]
