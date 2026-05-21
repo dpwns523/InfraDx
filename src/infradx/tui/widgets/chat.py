@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from rich.markdown import Markdown
+
 from textual import events
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import RichLog, Button, TextArea
+from textual.widgets import RichLog, Button, TextArea, Static
 from textual.containers import Vertical, Horizontal
 
 
@@ -43,6 +45,12 @@ class ChatPanel(Widget):
         scrollbar-gutter: stable;
     }
 
+    ChatPanel #typing-indicator {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
     ChatPanel #action-bar {
         height: 3;
         padding: 0 1;
@@ -71,11 +79,11 @@ class ChatPanel(Widget):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._stream_buffer: str = ""
-        self._streaming_started: bool = False
+        self._full_buffer: str = ""
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", markup=True, wrap=True, highlight=True)
+        yield Static("", id="typing-indicator", markup=True)
         with Horizontal(id="action-bar"):
             yield Button("📊 메트릭 분석", id="btn-metrics", variant="default")
             yield Button("🔍 가설 업데이트", id="btn-hypothesize", variant="default")
@@ -96,27 +104,25 @@ class ChatPanel(Widget):
         log.write(f"[bold cyan]You:[/bold cyan] {text}")
 
     def append_assistant_start(self) -> None:
-        self._stream_buffer = ""
-        self._streaming_started = False
+        self._full_buffer = ""
+        indicator = self.query_one("#typing-indicator", Static)
+        indicator.update("[dim]InfraDx: ▍ 작성 중...[/dim]")
+        indicator.display = True
 
     def append_chunk(self, chunk: str) -> None:
-        log = self.query_one("#chat-log", RichLog)
-        self._stream_buffer += chunk
-        lines = self._stream_buffer.split("\n")
-        for line in lines[:-1]:
-            prefix = "[bold green]InfraDx:[/bold green] " if not self._streaming_started else ""
-            self._streaming_started = True
-            log.write(prefix + line)
-        self._stream_buffer = lines[-1]
+        self._full_buffer += chunk
 
     def append_assistant_end(self) -> None:
+        indicator = self.query_one("#typing-indicator", Static)
+        indicator.display = False
+        indicator.update("")
+
         log = self.query_one("#chat-log", RichLog)
-        if self._stream_buffer:
-            prefix = "[bold green]InfraDx:[/bold green] " if not self._streaming_started else ""
-            log.write(prefix + self._stream_buffer)
-            self._stream_buffer = ""
-            self._streaming_started = False
+        if self._full_buffer:
+            log.write("[bold green]InfraDx:[/bold green]")
+            log.write(Markdown(self._full_buffer))
         log.write("")
+        self._full_buffer = ""
 
     def clear_input(self) -> None:
         self.query_one("#chat-input", _ChatInput).clear()

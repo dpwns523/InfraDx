@@ -69,6 +69,11 @@ class Session:
     hypotheses: list[Hypothesis] = field(default_factory=list)
     root_cause: str | None = None
     messages: list[dict] = field(default_factory=list)
+    # Token usage tracking
+    last_prompt_tokens: int = 0
+    last_output_tokens: int = 0
+    total_output_tokens: int = 0
+    context_limit: int = 200_000
 
     def advance_phase(self) -> None:
         phases = list(Phase)

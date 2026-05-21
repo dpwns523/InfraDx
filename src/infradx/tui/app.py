@@ -13,7 +13,7 @@ from textual import on, work
 from infradx.state.session import Session
 from infradx.agent.core import AgentCore
 from infradx.tui.widgets.chat import ChatPanel, _ChatInput
-from infradx.tui.widgets.sidebar import SidebarPanel
+from infradx.tui.widgets.sidebar import SidebarPanel, _PHASE_LABELS, _PHASE_REASK
 
 
 _WELCOME = """\
@@ -100,6 +100,18 @@ class InfraDxApp(App):
         chat.append_user(text)
 
         self._handle_user_message(text)
+
+    @on(SidebarPanel.PhaseClicked)
+    async def on_phase_clicked(self, event: SidebarPanel.PhaseClicked) -> None:
+        if self._is_streaming:
+            return
+        message = _PHASE_REASK.get(event.phase)
+        if not message:
+            return
+        chat = self.query_one("#chat-panel", ChatPanel)
+        phase_label = _PHASE_LABELS.get(event.phase, event.phase.value)
+        chat.append_user(f"[단계 재실행] {phase_label}")
+        self._handle_user_message(message)
 
     @on(Button.Pressed, "#btn-metrics")
     @on(Button.Pressed, "#btn-hypothesize")
@@ -226,6 +238,8 @@ class InfraDxApp(App):
 
         content = "\n".join(lines)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = Path.home() / "Desktop" / f"infradx_report_{timestamp}.md"
+        result_dir = Path(__file__).parent.parent.parent.parent / "result"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        path = result_dir / f"infradx_report_{timestamp}.md"
         path.write_text(content, encoding="utf-8")
-        self.notify(f"보고서 저장됨: {path.name}", severity="information")
+        self.notify(f"보고서 저장됨: result/{path.name}", severity="information")

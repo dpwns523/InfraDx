@@ -81,6 +81,8 @@ class _Backend(Protocol):
 # ── Anthropic backend ────────────────────────────────────────────────────────
 
 class _AnthropicBackend:
+    context_limit = 200_000
+
     def __init__(self) -> None:
         import anthropic
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -91,6 +93,7 @@ class _AnthropicBackend:
             )
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = os.environ.get("INFRADX_MODEL", "claude-sonnet-4-6")
+        self.last_usage: tuple[int, int] | None = None
 
     async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
         with self._client.messages.stream(
@@ -101,11 +104,19 @@ class _AnthropicBackend:
         ) as s:
             for text in s.text_stream:
                 yield text
+            try:
+                final = s.get_final_message()
+                u = final.usage
+                self.last_usage = (u.input_tokens, u.output_tokens)
+            except Exception:
+                pass
 
 
 # ── OpenAI / Codex backend ───────────────────────────────────────────────────
 
 class _OpenAIBackend:
+    context_limit = 128_000
+
     def __init__(self) -> None:
         import openai
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -116,6 +127,7 @@ class _OpenAIBackend:
             )
         self._client = openai.AsyncOpenAI(api_key=api_key)
         self._model = os.environ.get("INFRADX_MODEL", "gpt-4o")
+        self.last_usage: tuple[int, int] | None = None
 
     async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
         full_messages = [{"role": "system", "content": system}] + messages
@@ -124,11 +136,16 @@ class _OpenAIBackend:
             messages=full_messages,
             max_tokens=2048,
             stream=True,
+            stream_options={"include_usage": True},
         ) as s:
             async for chunk in s:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield delta
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                if chunk.usage:
+                    self.last_usage = (
+                        chunk.usage.prompt_tokens,
+                        chunk.usage.completion_tokens,
+                    )
 
 
 # ── Claude Code CLI backend ──────────────────────────────────────────────────
@@ -137,12 +154,15 @@ class _ClaudeCodeBackend:
     """Uses the locally installed `claude` CLI (Claude Code Pro subscription).
     No separate API key needed — streams via subprocess using stream-json format."""
 
+    context_limit = 200_000
+
     def __init__(self) -> None:
         if not shutil.which("claude"):
             raise RuntimeError(
                 "`claude` CLI를 찾을 수 없습니다.\n"
                 "Claude Code가 설치되어 있는지 확인해 주세요."
             )
+        self.last_usage: tuple[int, int] | None = None
 
     async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
         prompt = self._format_messages(messages)
@@ -160,17 +180,29 @@ class _ClaudeCodeBackend:
             env = {k: v for k, v in os.environ.items()
                    if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
 
-            proc = await asyncio.create_subprocess_exec(
+            args = [
                 "claude", "-p", prompt,
                 "--system-prompt-file", sys_file,
                 "--output-format", "stream-json",
                 "--include-partial-messages",
                 "--verbose",
                 "--no-session-persistence",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
+            ]
+            # On Windows, `claude` is a .cmd script that requires cmd.exe
+            if os.name == "nt":
+                proc = await asyncio.create_subprocess_exec(
+                    "cmd", "/c", *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                )
 
             async for raw in proc.stdout:  # type: ignore[union-attr]
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -187,9 +219,16 @@ class _ClaudeCodeBackend:
                             text = evt["delta"]["text"]
                             if text:
                                 yield text
-                    elif data.get("type") == "result" and data.get("is_error"):
-                        err = data.get("result", "알 수 없는 오류")
-                        yield f"\n[오류] {err}"
+                    elif data.get("type") == "result":
+                        if data.get("is_error"):
+                            err = data.get("result", "알 수 없는 오류")
+                            yield f"\n[오류] {err}"
+                        usage = data.get("usage", {})
+                        if usage:
+                            self.last_usage = (
+                                usage.get("input_tokens", 0),
+                                usage.get("output_tokens", 0),
+                            )
                 except json.JSONDecodeError:
                     pass
 
@@ -264,11 +303,11 @@ class AgentCore:
     def __init__(self) -> None:
         self._backend = _make_backend()
         self._agent_md = _load_agent_md()
-        # Pre-load all skill files into a cache
         self._skill_cache: dict[str, str] = {}
         for path in _SKILLS_DIR.glob("*.md"):
             self._skill_cache[path.stem] = path.read_text(encoding="utf-8")
         self._kb = get_knowledge_base()
+        self._context_limit: int = getattr(self._backend, "context_limit", 200_000)
 
     def _build_system_prompt(self, phase: Phase) -> str:
         """Build a phase-appropriate system prompt (AGENT.md + relevant skills only)."""
@@ -284,6 +323,7 @@ class AgentCore:
         self, session: Session, user_message: str
     ) -> AsyncIterator[str]:
         session.add_message("user", user_message)
+        session.context_limit = self._context_limit
 
         system = self._build_system_prompt(session.phase)
         context_prefix = self._build_context_prefix(session)
@@ -298,6 +338,11 @@ class AgentCore:
         self._update_session_phase(session, full_response)
         self._parse_hypotheses(session, full_response)
         self._parse_root_cause(session, full_response)
+
+        usage = getattr(self._backend, "last_usage", None)
+        if usage:
+            session.last_prompt_tokens, session.last_output_tokens = usage
+            session.total_output_tokens += usage[1]
 
     def _build_context_prefix(self, session: Session) -> str:
         lines = [
@@ -411,18 +456,28 @@ class AgentCore:
 
     def _update_session_phase(self, session: Session, response: str) -> None:
         response_lower = response.lower()
+        phase_order = list(Phase)
+        current_idx = phase_order.index(session.phase)
+
         phase_signals = {
-            Phase.CLASSIFY: ["domain", "server", "network", "disk", "영역"],
-            Phase.GATHER_SPEC: ["spec", "uname", "kernel", "사양", "운영체제"],
-            Phase.DESCRIBE_SYMPTOM: ["증상", "symptom", "에러", "error", "언제부터"],
-            Phase.REQUEST_METRICS: ["명령어", "command", "붙여넣", "paste"],
-            Phase.ANALYZE: ["분석", "analysis", "가설", "hypothesis"],
-            Phase.HYPOTHESIZE: ["근본 원인", "root cause", "최종 진단"],
-            Phase.REPRODUCE: ["재현", "reproduction", "재현 시나리오"],
-            Phase.RECOMMEND: ["권고", "recommend", "즉각 조치", "mitigation"],
+            Phase.CLASSIFY:         ["영역", "domain", "서버인가요", "네트워크인가요", "디스크인가요"],
+            Phase.GATHER_SPEC:      ["uname", "kernel", "운영체제", "배포 유형", "버전을 알려", "어떤 os"],
+            Phase.DESCRIBE_SYMPTOM: ["증상", "symptom", "언제부터", "언제 시작", "에러 메시지"],
+            Phase.REQUEST_METRICS:  ["명령어", "실행해주세요", "붙여넣", "paste", "수집해주세요",
+                                     "iostat", "vmstat", "df -h", "free -m", "netstat",
+                                     "journalctl", "kubectl get", "kubectl describe", "top -"],
+            Phase.ANALYZE:          ["분석", "analysis", "패턴", "의심", "가능성"],
+            Phase.HYPOTHESIZE:      ["근본 원인", "root cause", "최종 진단", "가설 확정"],
+            Phase.REPRODUCE:        ["재현", "reproduction", "재현 시나리오", "재현 방법"],
+            Phase.RECOMMEND:        ["권고", "recommend", "즉각 조치", "mitigation", "해결 방법"],
         }
+
+        # Find the highest phase whose signals appear in the response
+        best_idx = current_idx
         for phase, signals in phase_signals.items():
-            if any(sig in response_lower for sig in signals):
-                if phase.value > session.phase.value:
-                    session.phase = phase
-                break
+            candidate_idx = phase_order.index(phase)
+            if candidate_idx > current_idx and any(sig in response_lower for sig in signals):
+                best_idx = max(best_idx, candidate_idx)
+
+        if best_idx > current_idx:
+            session.phase = phase_order[best_idx]

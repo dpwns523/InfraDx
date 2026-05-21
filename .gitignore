@@ -25,6 +25,7 @@ build/
 Thumbs.db
 
 # InfraDx runtime
+result/
 ~/.local/share/infradx/
 *.db
 *.db-shm
