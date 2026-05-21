@@ -26,9 +26,10 @@
 - **단계별 추론** — 한 번에 하나씩 물어보며 가설을 검증합니다 (정보 폭탄 없음)
 - **5개 도메인** — 서버(Linux/AIX), 네트워크, 디스크, Kubernetes, 퍼블릭 클라우드 (AWS/GCP/Azure)
 - **지식베이스 연동** — 51개 Known Issue DB가 자동으로 관련 항목을 컨텍스트에 주입
-- **멀티 프로바이더** — Anthropic Claude 또는 OpenAI GPT-4 선택 가능
+- **멀티 프로바이더** — Claude Code CLI(API 키 불필요), OpenAI GPT-4o, Anthropic Claude 선택 가능
 - **재현 시나리오 생성** — 근본 원인 확정 후 최소 재현 절차와 격리 테스트 명령어 제공
 - **명령어 클립보드 복사** — 제시된 진단 명령어를 `Ctrl+C`로 즉시 복사
+- **컨텍스트 게이지** — 사이드바에서 현재 토큰 사용량을 실시간으로 확인
 
 ---
 
@@ -160,8 +161,9 @@ ionice -c 3 nice -n 10 /usr/local/bin/backup.sh
 | 단축키 | 기능 |
 |--------|------|
 | `Enter` | 메시지 전송 |
+| `Shift+Enter` | 줄바꿈 (여러 줄 입력) |
 | `Ctrl+C` | 마지막 제시 명령어 클립보드 복사 |
-| `Ctrl+S` | 현재 세션을 마크다운 보고서로 저장 (Desktop) |
+| `Ctrl+S` | 현재 세션을 마크다운 보고서로 저장 (`result/` 디렉토리) |
 | `Ctrl+N` | 새 세션 시작 |
 | `Ctrl+Q` | 종료 |
 
@@ -174,6 +176,15 @@ ionice -c 3 nice -n 10 /usr/local/bin/backup.sh
 | `📊 메트릭 분석` | 현재 가설 기준으로 다음 수집 명령어 요청 |
 | `🔍 가설 업데이트` | 수집된 데이터로 가설 신뢰도 재평가 |
 | `📋 결론 도출` | 최종 진단과 권고사항 출력 |
+
+### 사이드바
+
+우측 사이드바에서 진행 상황을 한눈에 확인할 수 있습니다.
+
+- **진행 단계** — 현재 단계(`→`) 및 완료 단계(`✓`) 표시. 클릭하면 해당 단계를 다시 수행합니다.
+- **시스템 정보** — 수집된 OS, Cloud, K8s 스펙 요약
+- **현재 가설** — AI가 추론 중인 가설 목록과 신뢰도/상태
+- **컨텍스트 사용량** — 현재 요청의 토큰 수 / 모델 컨텍스트 한계 게이지
 
 ---
 
@@ -309,19 +320,56 @@ python -m infradx
 
 ---
 
-### 프로바이더별 API 키
+## AI 프로바이더
 
-| 프로바이더 | 키 발급 위치 | 비고 |
-|-----------|------------|------|
-| `claudecode` | 불필요 | Claude Code Pro 구독 + `claude` CLI 설치 필요 |
-| `openai` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | 유료 |
-| `anthropic` | [console.anthropic.com](https://console.anthropic.com) | Pro 구독과 별개, 유료 |
+InfraDx는 세 가지 백엔드를 지원합니다. `INFRADX_PROVIDER` 환경변수로 선택합니다.
 
-### 5. 실행
+| `INFRADX_PROVIDER` | API 키 | 설명 |
+|--------------------|--------|------|
+| `claudecode` (또는 `local`) | **불필요** | 로컬에 설치된 `claude` CLI를 서브프로세스로 호출. Claude Code Pro 구독으로 인증. |
+| `openai` (또는 `codex`) | **필수** (`OPENAI_API_KEY`) | OpenAI API를 직접 호출. GPT-4o 기본. `codex`는 같은 백엔드의 별칭. |
+| `anthropic` (또는 `claude`) | **필수** (`ANTHROPIC_API_KEY`) | Anthropic API를 직접 호출. claude-sonnet-4-6 기본. |
 
+> **주의:** `INFRADX_PROVIDER=codex`는 OpenAI **API** 백엔드의 별칭입니다.
+> OpenAI의 Codex CLI 도구(`codex` 명령어)와 다르며, `OPENAI_API_KEY`가 필요합니다.
+> API 키 없이 사용하려면 `claudecode` 프로바이더를 사용하세요.
+
+### 프로바이더별 사전 조건
+
+**claudecode** (권장, API 키 불필요)
 ```bash
-python -m infradx
+# Claude Code 설치 확인
+claude --version
+
+# 로그인 상태 확인
+claude auth status
 ```
+
+**openai**
+```bash
+uv pip install -e ".[openai]"
+# .env에 OPENAI_API_KEY 설정
+```
+
+**anthropic**
+```bash
+# anthropic 패키지는 기본 의존성에 포함
+# .env에 ANTHROPIC_API_KEY 설정
+```
+
+---
+
+## 환경변수 전체 목록
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `INFRADX_PROVIDER` | `openai` | AI 프로바이더 (`claudecode` / `openai` / `anthropic`) |
+| `OPENAI_API_KEY` | — | OpenAI API 키 (`openai`/`codex` 사용 시 필수) |
+| `ANTHROPIC_API_KEY` | — | Anthropic API 키 (`anthropic`/`claude` 사용 시 필수) |
+| `INFRADX_MODEL` | 프로바이더별 기본값 | 사용할 모델 ID (선택) |
+
+> `INFRADX_PROVIDER`를 설정하지 않으면 `openai`가 기본값입니다.
+> API 키 없이 바로 시작하려면 `.env`에 `INFRADX_PROVIDER=claudecode`를 설정하세요.
 
 ---
 
@@ -331,33 +379,24 @@ python -m infradx
 
 | 패키지 | 버전 | 용도 |
 |--------|------|------|
-| `anthropic` | ≥0.40.0 | Claude API 클라이언트 |
 | `textual` | ≥0.80.0 | TUI 프레임워크 |
+| `anthropic` | ≥0.40.0 | Anthropic API 클라이언트 |
 | `pyyaml` | ≥6.0 | 지식베이스 YAML 파싱 |
-| `pydantic` | ≥2.0.0 | 데이터 모델 검증 |
+| `rich` | ≥13.0.0 | 터미널 마크다운 렌더링 |
 | `python-dotenv` | ≥1.0.0 | `.env` 파일 로드 |
-| `rich` | ≥13.0.0 | 터미널 텍스트 렌더링 |
 | `pyperclip` | ≥1.9.0 | 클립보드 복사 |
-| `aiosqlite` | ≥0.20.0 | 비동기 세션 저장 |
-| `aiofiles` | ≥24.1.0 | 비동기 파일 I/O |
 
 ### 선택적 의존성
 
 | 패키지 | 설치 방법 | 용도 |
 |--------|----------|------|
-| `openai` | `pip install -e ".[openai]"` | GPT-4/Codex 백엔드 |
+| `openai` | `pip install -e ".[openai]"` | OpenAI GPT-4o 백엔드 |
 
 ### 개발 의존성
 
 ```bash
 uv pip install -e ".[dev]"
 ```
-
-| 패키지 | 용도 |
-|--------|------|
-| `pytest` | 테스트 |
-| `pytest-asyncio` | 비동기 테스트 |
-| `pytest-textual-snapshot` | TUI 스냅샷 테스트 |
 
 ---
 
@@ -378,40 +417,22 @@ infradx/
 │   ├── reproduce.md             # 재현 시나리오 템플릿
 │   └── recommend.md             # 즉각조치/근본수정/예방 템플릿
 ├── codex/
-│   └── agent_instructions.md    # OpenAI Codex/GPT-4 호환 지침 (Function Calling 포함)
+│   └── agent_instructions.md    # OpenAI GPT-4o 호환 지침 (Function Calling 포함)
+├── result/                      # Ctrl+S 보고서 저장 위치 (.gitignore에 포함)
 ├── src/infradx/
 │   ├── agent/core.py            # AI 에이전트 코어 (스트리밍, KB 컨텍스트 주입)
 │   ├── state/session.py         # 8단계 Phase 열거형 + 세션 데이터클래스
 │   ├── knowledge/
 │   │   ├── loader.py            # YAML KB 로더 + 키워드 검색 엔진
 │   │   └── data/                # 도메인별 Known Issue DB (총 51개 항목)
-│   │       ├── linux.yaml       # Linux 서버 이슈 (13개)
-│   │       ├── aix.yaml         # AIX 서버 이슈 (7개)
-│   │       ├── network.yaml     # 네트워크 이슈 (7개)
-│   │       ├── disk.yaml        # 디스크/스토리지 이슈 (7개)
-│   │       ├── kubernetes.yaml  # Kubernetes 이슈 (6개)
-│   │       ├── monitoring.yaml  # 모니터링 이슈 (3개)
-│   │       └── cloud.yaml       # 퍼블릭 클라우드 이슈 (8개)
 │   └── tui/
 │       ├── app.py               # Textual 메인 앱
 │       └── widgets/
-│           ├── chat.py          # 좌측 대화 패널
-│           └── sidebar.py       # 우측 사이드바 (단계/스펙/가설 표시)
+│           ├── chat.py          # 좌측 대화 패널 (마크다운 렌더링, 스트리밍)
+│           └── sidebar.py       # 우측 사이드바 (단계/스펙/가설/토큰 게이지)
 ├── .env.example                 # 환경변수 예시
 └── pyproject.toml               # 패키지 메타데이터 및 의존성
 ```
-
----
-
-## 환경변수 전체 목록
-
-| 변수 | 기본값 | 설명 |
-|------|--------|------|
-| `INFRADX_PROVIDER` | `openai` | AI 프로바이더 (`openai` / `anthropic`) |
-| `OPENAI_API_KEY` | — | OpenAI API 키 (GPT-4o / Codex 사용 시 필수) |
-| `ANTHROPIC_API_KEY` | — | Anthropic API 키 (Claude 사용 시 필수) |
-| `INFRADX_MODEL` | `gpt-4o` | 사용할 모델 ID |
-| `INFRADX_DB_PATH` | `~/.local/share/infradx/sessions.db` | 세션 저장 경로 |
 
 ---
 
