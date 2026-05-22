@@ -77,11 +77,20 @@ class InfraDxApp(App):
 
         try:
             self._agent = AgentCore()
+            backend = type(self._agent._backend).__name__
+            provider_label = {
+                "_AnthropicBackend":  "Anthropic API",
+                "_OpenAIBackend":     "OpenAI API",
+                "_ClaudeCodeBackend": "Claude Code CLI",
+                "_CodexCLIBackend":   "OpenAI Codex CLI",
+            }.get(backend, backend)
+            chat.query_one("#chat-log").write(
+                f"[dim]백엔드: {provider_label}[/dim]"
+            )
             self._send_init_message()
         except RuntimeError as e:
             chat.query_one("#chat-log").write(
-                f"[bold red]오류:[/bold red] {e}\n"
-                "[yellow]ANTHROPIC_API_KEY 환경변수를 설정해 주세요.[/yellow]"
+                f"[bold red]오류:[/bold red] {e}"
             )
 
         chat.focus_input()

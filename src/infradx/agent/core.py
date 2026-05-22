@@ -401,8 +401,34 @@ _PROVIDER_INSTALL = {
 }
 
 
+def _auto_detect_provider() -> str:
+    """Try each free CLI backend first, then API key backends, in priority order."""
+    if shutil.which("claude"):
+        return "claudecode"
+    if shutil.which("codex"):
+        return "codexcli"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    raise RuntimeError(
+        "사용 가능한 AI 프로바이더를 찾을 수 없습니다.\n"
+        "\n"
+        "다음 중 하나를 설정해 주세요:\n"
+        "  [무료] Claude Code CLI  → claude CLI 설치 후 로그인\n"
+        "  [무료] OpenAI Codex CLI → npm install -g @openai/codex 후 codex login\n"
+        "  [유료] OpenAI API       → .env에 OPENAI_API_KEY 설정\n"
+        "  [유료] Anthropic API    → .env에 ANTHROPIC_API_KEY 설정\n"
+        "\n"
+        "또는 .env에 INFRADX_PROVIDER=<값>으로 직접 지정하세요."
+    )
+
+
 def _make_backend() -> _AnthropicBackend | _OpenAIBackend:
-    provider = os.environ.get("INFRADX_PROVIDER", "openai").lower()
+    provider = os.environ.get("INFRADX_PROVIDER", "").strip().lower()
+    if not provider:
+        provider = _auto_detect_provider()
+
     cls = _PROVIDERS.get(provider)
     if cls is None:
         raise RuntimeError(
