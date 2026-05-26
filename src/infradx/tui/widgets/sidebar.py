@@ -133,6 +133,9 @@ class SidebarPanel(Widget):
             yield Static("── 시스템 정보 ──", classes="section-title")
             yield Static("수집 중...", id="spec-summary")
 
+            yield Static("── 증상 정보 ──", classes="section-title")
+            yield Static("수집 중...", id="symptom-display")
+
             yield Static("── 현재 가설 ──", classes="section-title")
             yield Static("가설 없음", id="hypothesis-display")
 
@@ -192,6 +195,21 @@ class SidebarPanel(Widget):
 
         self.query_one("#spec-summary", Static).update(
             "\n".join(spec_lines) if spec_lines else "수집 중..."
+        )
+
+        # Symptom summary
+        sym = session.symptom
+        sym_lines: list[str] = []
+        if sym.started_when:
+            sym_lines.append(f"발생: {sym.started_when}")
+        if sym.reproducibility:
+            sym_lines.append(f"재현율: {sym.reproducibility}")
+        if sym.error_text:
+            sym_lines.append(f"에러: {sym.error_text}")
+        if sym.recent_changes:
+            sym_lines.append(f"변경: {sym.recent_changes}")
+        self.query_one("#symptom-display", Static).update(
+            "\n".join(sym_lines) if sym_lines else "수집 중..."
         )
 
         hypo_display = self.query_one("#hypothesis-display", Static)

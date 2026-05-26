@@ -505,6 +505,9 @@ class AgentCore:
     async def stream_response(
         self, session: Session, user_message: str
     ) -> AsyncIterator[str]:
+        # Parse spec/symptom from user message before sending to AI
+        self._parse_user_context(session, user_message)
+
         session.add_message("user", user_message)
         session.context_limit = self._context_limit
 
@@ -637,6 +640,85 @@ class AgentCore:
             elif h.status == "investigating":
                 h.status = "invalidated"
 
+    def _parse_user_context(self, session: Session, message: str) -> None:
+        """Extract spec and symptom facts directly from the user's message."""
+        msg = message.lower()
+        spec = session.spec
+        sym = session.symptom
+
+        # ── OS ───────────────────────────────────────────────────────────────
+        if not spec.os_type:
+            for pattern, label in [
+                (r'rhel\s*([\d.]+)?',          'RHEL'),
+                (r'red\s*hat\s*([\d.]+)?',     'RHEL'),
+                (r'ubuntu\s*([\d.]+)?',        'Ubuntu'),
+                (r'centos\s*([\d.]+)?',        'CentOS'),
+                (r'debian\s*([\d.]+)?',        'Debian'),
+                (r'amazon\s*linux\s*([\d.]+)?','Amazon Linux'),
+                (r'aix\s*([\d.]+)?',           'AIX'),
+                (r'windows\s*server\s*([\d.]+)?', 'Windows Server'),
+            ]:
+                m = re.search(pattern, msg)
+                if m:
+                    ver = m.group(1).strip() if m.lastindex and m.group(1) else ''
+                    spec.os_type = f"{label} {ver}".strip()
+                    break
+
+        # ── Deployment type ───────────────────────────────────────────────────
+        if not spec.deployment_type:
+            if re.search(r'\bvm\b|vm서버|가상\s*서버|가상화|vmware|kvm|hyper.?v|virtual\s*machine', msg):
+                spec.deployment_type = 'VM'
+            elif re.search(r'\b(bare.?metal|베어.?메탈|물리\s*서버|physical)\b', msg):
+                spec.deployment_type = 'bare-metal'
+            elif re.search(r'\b(container|컨테이너|docker|podman)\b', msg):
+                spec.deployment_type = 'container'
+
+        # ── Cloud ─────────────────────────────────────────────────────────────
+        if not spec.cloud_provider:
+            if re.search(r'\baws\b|\bamazon\s+web\b', msg):
+                spec.cloud_provider = 'aws'
+            elif re.search(r'\bgcp\b|\bgoogle\s+cloud\b', msg):
+                spec.cloud_provider = 'gcp'
+            elif re.search(r'\bazure\b', msg):
+                spec.cloud_provider = 'azure'
+            elif re.search(r'\bncp\b|\bnaver\s+cloud\b', msg):
+                spec.cloud_provider = 'ncp'
+
+        # ── Kubernetes ────────────────────────────────────────────────────────
+        if not spec.k8s_distribution:
+            if re.search(r'\beks\b', msg):
+                spec.k8s_distribution = 'eks'
+            elif re.search(r'\bgke\b', msg):
+                spec.k8s_distribution = 'gke'
+            elif re.search(r'\baks\b', msg):
+                spec.k8s_distribution = 'aks'
+            elif re.search(r'\bkubernetes\b|\bk8s\b', msg):
+                spec.k8s_distribution = 'self-managed'
+
+        # ── Symptom: start time ───────────────────────────────────────────────
+        if not sym.started_when:
+            m = re.search(r'(새벽|오전|오후|어제|오늘|그저께)?\s*(\d+\s*시(?:\s*\d+\s*분)?)', message)
+            if not m:
+                m = re.search(r'(어제|오늘|방금|최근|\d+\s*(?:시간|일|분)\s*전)', message)
+            if m:
+                sym.started_when = m.group().strip()
+
+        # ── Symptom: error text ───────────────────────────────────────────────
+        if not sym.error_text:
+            m = re.search(
+                r'(error|에러|오류|exception|fail(?:ed)?|timeout|oom|out\s*of\s*memory)[^\n.]{0,100}',
+                message, re.IGNORECASE,
+            )
+            if m:
+                sym.error_text = m.group().strip()
+
+        # ── Symptom: reproducibility ──────────────────────────────────────────
+        if not sym.reproducibility:
+            if re.search(r'항상|매번|계속|지속|always|constant', msg):
+                sym.reproducibility = '항상'
+            elif re.search(r'간헐|가끔|때때로|random|intermittent', msg):
+                sym.reproducibility = '간헐적'
+
     def _update_session_phase(self, session: Session, response: str) -> None:
         response_lower = response.lower()
         phase_order = list(Phase)
@@ -655,12 +737,16 @@ class AgentCore:
             Phase.RECOMMEND:        ["권고", "recommend", "즉각 조치", "mitigation", "해결 방법"],
         }
 
-        # Find the highest phase whose signals appear in the response
+        # Find the highest matching phase, but cap advancement at 2 per turn.
+        # Prevents jumping from CLASSIFY straight to ANALYZE when the user
+        # provides a lot of information in one message.
         best_idx = current_idx
         for phase, signals in phase_signals.items():
             candidate_idx = phase_order.index(phase)
             if candidate_idx > current_idx and any(sig in response_lower for sig in signals):
                 best_idx = max(best_idx, candidate_idx)
+
+        best_idx = min(best_idx, current_idx + 2)   # max 2 phases per turn
 
         if best_idx > current_idx:
             session.phase = phase_order[best_idx]
