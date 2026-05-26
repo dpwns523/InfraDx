@@ -4,6 +4,7 @@ from rich.markdown import Markdown
 
 from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import RichLog, Button, TextArea, Static
@@ -12,6 +13,14 @@ from textual.containers import Vertical, Horizontal
 
 class _ChatInput(TextArea):
     """Multi-line input: Enter submits, Shift+Enter inserts newline."""
+
+    # Explicit Ctrl+V binding: fallback for terminals that send ctrl+v as a
+    # key event instead of using bracketed paste (e.g. Windows cmd/PowerShell).
+    # Terminals with bracketed paste intercept Ctrl+V themselves and send
+    # escape sequences, so this action never double-fires in those cases.
+    BINDINGS = [
+        Binding("ctrl+v", "paste_from_clipboard", show=False),
+    ]
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -26,6 +35,21 @@ class _ChatInput(TextArea):
                 self.clear()
             event.prevent_default()
         # shift+enter → TextArea default (inserts newline)
+
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle bracketed paste (standard terminals: macOS Terminal, Windows Terminal)."""
+        self.insert(event.text)
+        event.stop()
+
+    def action_paste_from_clipboard(self) -> None:
+        """Ctrl+V fallback via pyperclip (cmd.exe / PowerShell without bracketed paste)."""
+        try:
+            import pyperclip
+            text = pyperclip.paste()
+            if text:
+                self.insert(text)
+        except Exception:
+            pass
 
 
 class ChatPanel(Widget):
