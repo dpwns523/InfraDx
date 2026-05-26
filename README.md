@@ -188,6 +188,44 @@ ionice -c 3 nice -n 10 /usr/local/bin/backup.sh
 
 ---
 
+## 사전 조건
+
+### Git
+
+저장소 클론에 필요합니다.
+
+| OS | 설치 방법 |
+|----|----------|
+| macOS | `brew install git` 또는 Xcode Command Line Tools: `xcode-select --install` |
+| Ubuntu/Debian | `sudo apt install git` |
+| RHEL/Fedora | `sudo dnf install git` |
+| Windows | [https://git-scm.com/download/win](https://git-scm.com/download/win) → Git for Windows 설치 |
+
+설치 확인: `git --version`
+
+---
+
+### Node.js / npm (Codex CLI 사용 시만 필요)
+
+`INFRADX_PROVIDER=codexcli` 사용 시 필요합니다.
+
+| OS | 설치 방법 |
+|----|----------|
+| macOS | `brew install node` 또는 [https://nodejs.org](https://nodejs.org) LTS |
+| Ubuntu/Debian | `sudo apt install nodejs npm` |
+| RHEL/Fedora | `sudo dnf install nodejs npm` |
+| Windows | [https://nodejs.org](https://nodejs.org) → LTS 설치 프로그램 실행 |
+
+설치 확인: `node --version && npm --version`
+
+Codex CLI 설치 및 로그인:
+```bash
+npm install -g @openai/codex
+codex login
+```
+
+---
+
 ## 터미널에서 시작하는 방법
 
 - [macOS / Linux](#macos--linux)

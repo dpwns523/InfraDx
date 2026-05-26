@@ -272,10 +272,37 @@ class _CodexCLIBackend:
 
     def __init__(self) -> None:
         if not shutil.which("codex"):
+            # Diagnose whether Node.js / npm are also missing
+            has_node = shutil.which("node") or shutil.which("node.exe")
+            has_npm  = shutil.which("npm")  or shutil.which("npm.cmd")
+            if not has_node:
+                raise RuntimeError(
+                    "Node.js가 설치되어 있지 않습니다. Codex CLI는 Node.js가 필요합니다.\n"
+                    "\n"
+                    "▶ macOS:   brew install node\n"
+                    "▶ Windows: https://nodejs.org → LTS 설치 프로그램 실행\n"
+                    "▶ Linux:   sudo apt install nodejs npm   (Debian/Ubuntu)\n"
+                    "           sudo dnf install nodejs npm   (RHEL/Fedora)\n"
+                    "\n"
+                    "설치 후 터미널 재시작 → npm install -g @openai/codex → codex login"
+                )
+            if not has_npm:
+                raise RuntimeError(
+                    "npm이 설치되어 있지 않습니다.\n"
+                    "\n"
+                    "▶ macOS/Linux: Node.js 공식 설치 패키지에 npm이 포함되어 있습니다.\n"
+                    "               https://nodejs.org 에서 LTS 버전을 설치하세요.\n"
+                    "▶ Windows:     https://nodejs.org → LTS 설치 프로그램 실행\n"
+                    "\n"
+                    "설치 후: npm install -g @openai/codex → codex login"
+                )
             raise RuntimeError(
-                "`codex` CLI를 찾을 수 없습니다.\n"
-                "npm install -g @openai/codex 로 설치 후 로그인해 주세요:\n"
-                "  codex login"
+                "`codex` CLI가 설치되어 있지 않습니다.\n"
+                "\n"
+                "  npm install -g @openai/codex\n"
+                "  codex login\n"
+                "\n"
+                "설치 후 InfraDx를 다시 실행하세요."
             )
         self.last_usage: tuple[int, int] | None = None
 
@@ -414,13 +441,19 @@ def _auto_detect_provider() -> str:
     raise RuntimeError(
         "사용 가능한 AI 프로바이더를 찾을 수 없습니다.\n"
         "\n"
-        "다음 중 하나를 설정해 주세요:\n"
-        "  [무료] Claude Code CLI  → claude CLI 설치 후 로그인\n"
-        "  [무료] OpenAI Codex CLI → npm install -g @openai/codex 후 codex login\n"
-        "  [유료] OpenAI API       → .env에 OPENAI_API_KEY 설정\n"
-        "  [유료] Anthropic API    → .env에 ANTHROPIC_API_KEY 설정\n"
+        "── API 키 불필요 (권장) ──────────────────────────────\n"
+        "  Claude Code CLI:\n"
+        "    https://claude.ai/download  →  claude login\n"
         "\n"
-        "또는 .env에 INFRADX_PROVIDER=<값>으로 직접 지정하세요."
+        "  OpenAI Codex CLI:\n"
+        "    npm install -g @openai/codex  →  codex login\n"
+        "    (Node.js 필요: https://nodejs.org)\n"
+        "\n"
+        "── API 키 필요 ───────────────────────────────────────\n"
+        "  OpenAI:    .env에 OPENAI_API_KEY=sk-...\n"
+        "  Anthropic: .env에 ANTHROPIC_API_KEY=sk-ant-...\n"
+        "\n"
+        "설치 후 InfraDx를 다시 실행하세요."
     )
 
 
